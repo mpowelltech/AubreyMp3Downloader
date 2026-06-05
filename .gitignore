@@ -14,3 +14,7 @@ ffmpeg_extract/
 # Smoke-test output
 smoke_out.mp3
 *.mp3
+
+# Local Windows-VM build output (copied back from the VM)
+_winbuild_out/
+*.exe
