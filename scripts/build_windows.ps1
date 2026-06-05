@@ -58,14 +58,31 @@ function Get-PythonCandidates {
     $list | Where-Object { $_ -and ($_ -notlike "*WindowsApps*") } | Select-Object -Unique
 }
 
-function Test-PyArch($p) {
-    if (-not (Test-Path $p)) { return "" }
-    try { return (& $p -c "import platform;print(platform.machine())" 2>$null).Trim() } catch { return "" }
+# Read the binary's PE header machine type. This is the ONLY reliable way to
+# tell x64 from ARM64 on Windows-on-ARM: asking Python via platform.machine()
+# returns the NATIVE arch (ARM64) for an x64 process running under emulation.
+function Get-PEMachine($path) {
+    if (-not (Test-Path $path)) { return 0 }
+    try {
+        $fs = [System.IO.File]::OpenRead($path)
+        try {
+            $br = New-Object System.IO.BinaryReader($fs)
+            $fs.Position = 0x3C
+            $peOff = $br.ReadInt32()
+            $fs.Position = $peOff
+            if ($br.ReadUInt32() -ne 0x00004550) { return 0 }   # "PE\0\0"
+            return $br.ReadUInt16()                              # IMAGE_FILE_MACHINE_*
+        } finally { $fs.Dispose() }
+    } catch { return 0 }
+}
+
+function Get-ArchName($m) {
+    switch ($m) { 0x8664 { "x64" } 0xAA64 { "ARM64" } 0x14C { "x86" } default { "?($m)" } }
 }
 
 function Find-X64Python {
     foreach ($p in (Get-PythonCandidates)) {
-        if ((Test-PyArch $p) -eq "AMD64") { return $p }
+        if ((Get-PEMachine $p) -eq 0x8664) { return $p }   # IMAGE_FILE_MACHINE_AMD64
     }
     return $null
 }
@@ -94,10 +111,10 @@ if (-not $py) {
 }
 if (-not $py) {
     Write-Host "`nStill could not find an x64 Python. Here's what I did find:" -ForegroundColor Red
-    foreach ($p in (Get-PythonCandidates)) { Write-Host ("  [{0,-7}] {1}" -f (Test-PyArch $p), $p) }
-    throw "Could not find or install an x64 Python."
+    foreach ($p in (Get-PythonCandidates)) { Write-Host ("  [{0,-6}] {1}" -f (Get-ArchName (Get-PEMachine $p)), $p) }
+    throw "Could not find an x64 Python."
 }
-Write-Host ("Using Python: {0}  ({1})" -f $py, (& $py -c "import platform,sys;print(platform.machine(), sys.version.split()[0])")) -ForegroundColor Green
+Write-Host ("Using Python: {0}  ({1}, v{2})" -f $py, (Get-ArchName (Get-PEMachine $py)), (& $py -c "import sys;print(sys.version.split()[0])")) -ForegroundColor Green
 
 # --- 2. Copy project to a fast local working folder -------------------------
 Section "Copying project to a local working folder"
