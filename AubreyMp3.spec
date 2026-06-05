@@ -22,11 +22,15 @@ if os.path.exists(_ffmpeg):
 _icon = os.path.join("assets", "icon.ico")
 icon = _icon if os.path.exists(_icon) else None
 
+datas = list(ctk_datas)
+if os.path.isdir("assets"):
+    datas.append(("assets", "assets"))   # bundle icon.ico / icon.png for the runtime window icon
+
 a = Analysis(
     ["run.py"],
     pathex=[],
     binaries=binaries,
-    datas=list(ctk_datas),
+    datas=datas,
     hiddenimports=list(ctk_hidden),
     hookspath=[],
     hooksconfig={},

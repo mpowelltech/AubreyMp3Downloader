@@ -107,8 +107,10 @@ def download_audio(
 
     assert proc.stdout is not None
     tail: list[str] = []
-    for line in proc.stdout:
-        line = line.strip()
+    # readline() (not "for line in proc.stdout") so progress streams in real time
+    # on Windows instead of being block-buffered until the process exits.
+    for raw in iter(proc.stdout.readline, ""):
+        line = raw.strip()
         if line.startswith("dl:"):
             m = _PCT.search(line)
             if m and on_progress:
