@@ -50,12 +50,24 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# Splash shown DURING the one-file unpack (before our code runs), so first
+# launch isn't a silent gap while Windows extracts ~88 MB / Defender scans it.
+# The app closes it (pyi_splash.close) the moment its window is ready.
+_splash_img = os.path.join(HERE, "assets", "splash.png")
+splash = Splash(
+    _splash_img,
+    binaries=a.binaries,
+    datas=a.datas,
+    always_on_top=True,
+) if os.path.exists(_splash_img) else None
+
+_exe_args = [pyz, a.scripts]
+if splash is not None:
+    _exe_args += [splash, splash.binaries]
+_exe_args += [a.binaries, a.datas, []]
+
 exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+    *_exe_args,
     name="Aubreys-YT-MP3-Downloader",
     debug=False,
     bootloader_ignore_signals=False,

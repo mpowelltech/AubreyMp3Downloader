@@ -139,6 +139,7 @@ class App(ctk.CTk):
         self._build_ui()
         self._set_state("starting")
         self._bar_indeterminate()  # animate while the engine sets up on first run
+        self.after(0, self._close_splash)   # dismiss the PyInstaller splash now the window is up
         self.after(100, self._poll)
         threading.Thread(target=self._init_engine, daemon=True).start()
 
@@ -304,6 +305,14 @@ class App(ctk.CTk):
         ]
 
     # ---- window icon + progress bar (main thread only) ------------------- #
+
+    def _close_splash(self) -> None:
+        # pyi_splash only exists in the frozen build that bundled the splash.
+        try:
+            import pyi_splash
+            pyi_splash.close()
+        except Exception:
+            pass
 
     def _apply_icon(self) -> None:
         try:
