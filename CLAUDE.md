@@ -63,6 +63,18 @@ touch Tk widgets from a worker thread.**
   fresh PCs); ffmpeg presence is verified at startup; and any setup failure drops
   to a locked `"failed"` state with a Retry prompt — the app refuses to proceed
   without its tools (`_verify_ffmpeg`, `_on_setup_error`, `_start_engine`).
+- **HiDPI sizing:** customtkinter's `CTk.geometry("WxH")` multiplies W/H by the
+  display DPI factor, so hardcoded sizes oversize on HiDPI Windows. Instead,
+  `App._fit_window()` measures content via `winfo_reqheight()` (already physical
+  px) and writes RAW `tk.Tk.geometry(self, ...)` (bypassing the CTk multiplier),
+  clamped to the screen. The bulk list (`CTkScrollableFrame`, fixed `height`)
+  scrolls so the window stays compact regardless of song count. Don't hardcode
+  window geometries; call `_fit_window`. (Edge: moving across monitors of
+  different DPI won't auto-refit — fine for a single-screen target.)
+- **Self-replacing updater:** the swap script retries `move /Y` until the old
+  exe's lock releases (a one-file app is a *child* of the bootloader, which holds
+  the .exe briefly after exit) and runs hidden via `CREATE_NO_WINDOW`. A given
+  build's updater only fixes updates made *from* it onward.
 - **App self-update:** on startup the frozen Windows exe compares the GitHub
   `releases/latest` tag to `__version__`; if newer it prompts, downloads the new
   exe beside the current one, and a detached `apply_update.bat` waits for this

@@ -130,8 +130,6 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title(APP_TITLE)
-        self.geometry("760x550")
-        self.minsize(730, 525)
         self.configure(fg_color=WINDOW_BG)
         self._apply_icon()
 
@@ -144,12 +142,12 @@ class App(ctk.CTk):
         self._indet = False
         self._syncing = False  # guards the Start/End <-> Skip first/last mirror
         self._bulk = None      # the bulk overlay frame, when open
-        self._saved_geometry = ""
         self._badges: dict[int, ctk.CTkLabel] = {}
         self._titles: dict[int, ctk.CTkLabel] = {}
         self.q: "queue.Queue[tuple[str, object]]" = queue.Queue()
 
         self._build_ui()
+        self._fit_window()                  # size to content (correct on any display scaling)
         self.after(0, self._close_splash)   # dismiss the PyInstaller splash now the window is up
         self.after(100, self._poll)
         self._start_engine()
@@ -325,6 +323,23 @@ class App(ctk.CTk):
 
     # ---- window icon + progress bar (main thread only) ------------------- #
 
+    def _fit_window(self, content=None) -> None:
+        """Size the window to its content, correctly on any display scaling.
+
+        customtkinter's CTk.geometry() multiplies W/H by the DPI factor, which
+        oversizes hardcoded sizes on HiDPI Windows. winfo_reqheight() is already
+        in physical pixels, so we measure the content and write RAW Tk geometry
+        (bypassing the CTk override) — no double-scaling. For the bulk overlay,
+        pass that frame as `content` (placed children don't add to the root's
+        requested size). Clamped to the screen; the bulk list scrolls if needed.
+        """
+        self.update_idletasks()
+        src = content if content is not None else self
+        w = max(360, min(src.winfo_reqwidth(), int(self.winfo_screenwidth() * 0.95)))
+        h = max(300, min(src.winfo_reqheight(), int(self.winfo_screenheight() * 0.92)))
+        tk.Tk.geometry(self, f"{w}x{h}")
+        tk.Tk.minsize(self, w, h)
+
     def _close_splash(self) -> None:
         # pyi_splash only exists in the frozen build that bundled the splash.
         try:
@@ -466,12 +481,10 @@ class App(ctk.CTk):
             return
         from .bulk import BulkView  # lazy import avoids a circular import at startup
         try:
-            self._saved_geometry = self.geometry()
-            self.minsize(780, 680)
-            self.geometry("860x760")
             self._bulk = BulkView(self)
             self._bulk.place(relx=0, rely=0, relwidth=1, relheight=1)
             self._bulk.tkraise()  # cover the single-song screen
+            self._fit_window(self._bulk)  # size to the bulk content (DPI-correct)
         except Exception as e:
             self._close_bulk()
             messagebox.showerror(APP_TITLE, f"Couldn't open bulk mode.\n\n{e}")
@@ -481,11 +494,7 @@ class App(ctk.CTk):
         if self._bulk is not None:
             self._bulk.destroy()
             self._bulk = None
-        self.minsize(730, 525)
-        try:
-            self.geometry(self._saved_geometry or "760x550")
-        except Exception:
-            self.geometry("760x550")
+        self._fit_window()  # back to the single-song content size
 
     def _sync_set(self, var, value) -> None:
         """Set one trim var without retriggering the opposite mirror handler."""

@@ -11,7 +11,6 @@ into the exe.  Instead:
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import ssl
 import subprocess
@@ -205,25 +204,33 @@ def download_and_relaunch(asset_url: str, status: Optional[Callable[[str], None]
 
 
 def _spawn_replacer(current: Path, new: Path) -> None:
-    pid = os.getpid()
     bat = cache_dir() / "apply_update.bat"
-    # ping (not timeout) for the delay — timeout needs a console we won't have.
+    # Retry move/Y until the source is gone (i.e. the swap finally succeeded).
+    # We can't just wait on our PID: a PyInstaller one-file app runs as a child
+    # of the bootloader, and the bootloader keeps the .exe LOCKED for a moment
+    # after we exit. Looping the move until it works handles that race; AV locks
+    # on the freshly written exe too. Give up after ~2 min so it can't hang.
     script = (
         "@echo off\r\n"
-        ":wait\r\n"
-        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\r\n'
-        "if not errorlevel 1 (\r\n"
-        "  ping -n 2 127.0.0.1 >NUL\r\n"
-        "  goto wait\r\n"
-        ")\r\n"
-        f'move /Y "{new}" "{current}" >NUL\r\n'
-        f'start "" "{current}"\r\n'
+        "setlocal\r\n"
+        f'set "SRC={new}"\r\n'
+        f'set "DST={current}"\r\n'
+        "set /a tries=0\r\n"
+        ":retry\r\n"
+        'move /Y "%SRC%" "%DST%" >NUL 2>&1\r\n'
+        'if not exist "%SRC%" goto launch\r\n'
+        "set /a tries+=1\r\n"
+        "if %tries% GEQ 120 goto launch\r\n"
+        "ping -n 2 127.0.0.1 >NUL\r\n"
+        "goto retry\r\n"
+        ":launch\r\n"
+        'start "" "%DST%"\r\n'
         'del "%~f0"\r\n'
     )
     bat.write_text(script, encoding="utf-8")
+    # CREATE_NO_WINDOW: hidden console (no black flash), still survives our exit.
     subprocess.Popen(
         ["cmd", "/c", str(bat)],
-        creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         close_fds=True,
     )

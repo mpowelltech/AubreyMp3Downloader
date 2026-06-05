@@ -207,7 +207,10 @@ class BulkView(ctk.CTkFrame):
         ctk.CTkLabel(self, text="Songs to download", text_color=MUTED,
                      font=ctk.CTkFont(size=12, weight="bold"), anchor="w").grid(
             row=2, column=0, sticky="w", padx=22, pady=(2, 0))
-        self.list_frame = ctk.CTkScrollableFrame(self, fg_color=("gray94", "gray13"), label_text="")
+        # Fixed height keeps the window compact no matter how many songs are
+        # added — extra rows scroll. (height is widget-scaled by customtkinter.)
+        self.list_frame = ctk.CTkScrollableFrame(self, fg_color=("gray94", "gray13"),
+                                                 label_text="", height=240)
         self.list_frame.grid(row=3, column=0, sticky="nsew", padx=18, pady=(2, 4))
         self.list_frame.grid_columnconfigure(0, weight=1)
 
