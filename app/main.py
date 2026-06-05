@@ -129,6 +129,7 @@ class App(ctk.CTk):
         self.flow_state = "starting"
         self.loaded_url: str | None = None
         self._indet = False
+        self._syncing = False  # guards the Start/End <-> Skip first/last mirror
         self._badges: dict[int, ctk.CTkLabel] = {}
         self._titles: dict[int, ctk.CTkLabel] = {}
         self.q: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -185,14 +186,17 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             titles, text="Turn a YouTube song into an MP3 for the Yoto player.",
             text_color=MUTED, font=ctk.CTkFont(size=13)).pack(anchor="w")
+        ctk.CTkLabel(
+            titles, text="Built by Matt for my favourite niece ♥",
+            text_color=PINK, font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w", pady=(2, 0))
         right = ctk.CTkFrame(header, fg_color="transparent")
         right.grid(row=0, column=ncol, sticky="e", padx=(8, 0))
         self.several_btn = ctk.CTkButton(
-            right, text="≡  Several songs", width=132, fg_color=SECONDARY,
+            right, text="≡  Download multiple", width=152, fg_color=SECONDARY,
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_several)
         self.several_btn.pack(fill="x")
         self.new_btn = ctk.CTkButton(
-            right, text="↺  New video", width=132, fg_color=SECONDARY,
+            right, text="↺  New video", width=152, fg_color=SECONDARY,
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_new)
         self.new_btn.pack(fill="x", pady=(6, 0))
 
@@ -251,8 +255,10 @@ class App(ctk.CTk):
         self.end_entry.grid(row=0, column=3)
         ctk.CTkLabel(times, text="(mm:ss)", text_color=MUTED).grid(row=0, column=4, padx=(8, 0))
 
+        ctk.CTkLabel(b3, text="or", text_color=MUTED, font=ctk.CTkFont(size=12, slant="italic")).grid(
+            row=1, column=0, sticky="w", pady=(6, 0))
         quick = ctk.CTkFrame(b3, fg_color="transparent")
-        quick.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        quick.grid(row=2, column=0, sticky="ew", pady=(2, 0))
         ctk.CTkLabel(quick, text="Skip first").grid(row=0, column=0, padx=(0, 6))
         self.skipfirst_var = tk.StringVar(value="0")
         self.skipfirst_entry = ctk.CTkEntry(quick, textvariable=self.skipfirst_var, width=52)
@@ -263,13 +269,17 @@ class App(ctk.CTk):
         self.skiplast_entry = ctk.CTkEntry(quick, textvariable=self.skiplast_var, width=52)
         self.skiplast_entry.grid(row=0, column=4)
         ctk.CTkLabel(quick, text="sec").grid(row=0, column=5, padx=(4, 0))
-        # Apply to Start/End the instant the number changes (covers Enter, Tab,
-        # and clicking anywhere outside the box) — no confirm button needed.
+        # Start/End and Skip first/last are two views of the SAME trim: editing
+        # one updates the other live. self._syncing breaks the feedback loop.
         self.skipfirst_var.trace_add("write", lambda *_: self._skip_first())
         self.skiplast_var.trace_add("write", lambda *_: self._skip_last())
+        self.start_var.trace_add("write", lambda *_: self._start_changed())
+        self.end_var.trace_add("write", lambda *_: self._end_changed())
         ctk.CTkLabel(
-            b3, text="Optional. Set Start/End, or type seconds in Skip first/last and press Enter.",
-            text_color=MUTED, font=ctk.CTkFont(size=12)).grid(row=2, column=0, sticky="w", pady=(8, 0))
+            b3, text="Two ways to set the same trim: the Start/End times OR the Skip first/last "
+                     "seconds. Change either and the other updates to match.",
+            text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=560, justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
         # --- Download (primary action) ---
         self.download_btn = ctk.CTkButton(
@@ -419,23 +429,52 @@ class App(ctk.CTk):
             self.deiconify()
             messagebox.showerror(APP_TITLE, f"Couldn't open bulk mode.\n\n{e}")
 
-    def _skip_first(self) -> None:
-        if self.flow_state not in ("loaded", "done"):
+    def _sync_set(self, var, value) -> None:
+        """Set one trim var without retriggering the opposite mirror handler."""
+        self._syncing = True
+        try:
+            var.set(value)
+        finally:
+            self._syncing = False
+
+    def _skip_first(self) -> None:        # Skip first -> Start
+        if self._syncing or self.flow_state not in ("loaded", "done"):
             return
         try:
             n = float(self.skipfirst_var.get() or 0)
         except ValueError:
-            return  # silently ignore — this fires automatically on Tab-out
-        self.start_var.set(fmt_time(max(0, n)))
+            return
+        self._sync_set(self.start_var, fmt_time(max(0, n)))
 
-    def _skip_last(self) -> None:
-        if self.flow_state not in ("loaded", "done") or not self.info:
+    def _skip_last(self) -> None:         # Skip last -> End
+        if self._syncing or self.flow_state not in ("loaded", "done") or not self.info:
             return
         try:
             n = float(self.skiplast_var.get() or 0)
         except ValueError:
             return
-        self.end_var.set(fmt_time(max(0, self.info.duration - n)))
+        self._sync_set(self.end_var, fmt_time(max(0, self.info.duration - n)))
+
+    def _start_changed(self) -> None:     # Start -> Skip first
+        if self._syncing or self.flow_state not in ("loaded", "done"):
+            return
+        try:
+            s = parse_time(self.start_var.get())
+        except ValueError:
+            return
+        self._sync_set(self.skipfirst_var, str(int(round(max(0, s)))))
+
+    def _end_changed(self) -> None:       # End -> Skip last
+        if self._syncing or self.flow_state not in ("loaded", "done") or not self.info:
+            return
+        text = self.end_var.get().strip()
+        if not text:
+            return
+        try:
+            e = parse_time(text)
+        except ValueError:
+            return
+        self._sync_set(self.skiplast_var, str(int(round(max(0, self.info.duration - e)))))
 
     def _on_fetch(self) -> None:
         if self.flow_state != "empty" or not self.ready:

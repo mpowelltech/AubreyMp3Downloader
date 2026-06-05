@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import queue
 import re
+import sys
 import tempfile
 import threading
 import tkinter as tk
@@ -75,24 +76,28 @@ class BulkRow:
         self.start_var = tk.StringVar(value="0:00")
         self.end_var = tk.StringVar()
 
+        H = 32
         self.frame = ctk.CTkFrame(master, corner_radius=8, fg_color=("white", "gray17"))
         self.frame.grid_columnconfigure(1, weight=1)
-        self.icon = ctk.CTkLabel(self.frame, text="•", width=20, font=ctk.CTkFont(size=16, weight="bold"))
-        self.icon.grid(row=0, column=0, rowspan=2, padx=(10, 2), pady=8)
-        self.title_entry = ctk.CTkEntry(self.frame, textvariable=self.title_var, placeholder_text="(loads on Get info)")
-        self.title_entry.grid(row=0, column=1, sticky="ew", padx=4, pady=(8, 2))
-        self.start_entry = ctk.CTkEntry(self.frame, textvariable=self.start_var, width=66, placeholder_text="start")
-        self.start_entry.grid(row=0, column=2, padx=2, pady=(8, 2))
-        self.end_entry = ctk.CTkEntry(self.frame, textvariable=self.end_var, width=66, placeholder_text="end")
-        self.end_entry.grid(row=0, column=3, padx=(2, 4), pady=(8, 2))
+        # one aligned control row...
+        self.icon = ctk.CTkLabel(self.frame, text="•", width=22, height=H, font=ctk.CTkFont(size=15, weight="bold"))
+        self.icon.grid(row=0, column=0, padx=(12, 2), pady=(10, 0))
+        self.title_entry = ctk.CTkEntry(self.frame, textvariable=self.title_var, height=H,
+                                        placeholder_text="(loads on Get info)")
+        self.title_entry.grid(row=0, column=1, sticky="ew", padx=4, pady=(10, 0))
+        self.start_entry = ctk.CTkEntry(self.frame, textvariable=self.start_var, width=64, height=H, placeholder_text="start")
+        self.start_entry.grid(row=0, column=2, padx=2, pady=(10, 0))
+        self.end_entry = ctk.CTkEntry(self.frame, textvariable=self.end_var, width=64, height=H, placeholder_text="end")
+        self.end_entry.grid(row=0, column=3, padx=(2, 4), pady=(10, 0))
         self.del_btn = ctk.CTkButton(
-            self.frame, text="✕", width=30, fg_color=SECONDARY, hover_color=DEL_HOVER,
+            self.frame, text="✕", width=32, height=H, fg_color=SECONDARY, hover_color=DEL_HOVER,
             text_color=TITLE_ON, command=lambda: self.on_delete(self))
-        self.del_btn.grid(row=0, column=4, rowspan=2, padx=(2, 10))
+        self.del_btn.grid(row=0, column=4, padx=(2, 12), pady=(10, 0))
+        # ...with the status/URL line beneath the title.
         self.info_lbl = ctk.CTkLabel(
             self.frame, text=_short(self.url), text_color=MUTED,
             font=ctk.CTkFont(size=11), anchor="w", justify="left")
-        self.info_lbl.grid(row=1, column=1, columnspan=3, sticky="w", padx=4, pady=(0, 8))
+        self.info_lbl.grid(row=1, column=1, columnspan=3, sticky="w", padx=6, pady=(2, 10))
         self.refresh()
 
     # --- state ---
@@ -152,12 +157,11 @@ class BulkWindow(ctk.CTkToplevel):
         self.geometry("800x720")
         self.minsize(740, 640)
         self.configure(fg_color=WINDOW_BG)
-        try:
-            ico = resource_path("assets/icon.ico")
-            if ico.exists():
-                self.iconbitmap(default=str(ico))
-        except Exception:
-            pass
+        # customtkinter resets a Toplevel's icon ~200ms after creation, so set
+        # it now and again on a short delay.
+        self._set_icon()
+        self.after(250, self._set_icon)
+        self.after(600, self._set_icon)
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -170,7 +174,7 @@ class BulkWindow(ctk.CTkToplevel):
     # ---- UI ----
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)
+        self.grid_rowconfigure(3, weight=1)
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 2))
@@ -208,14 +212,16 @@ class BulkWindow(ctk.CTkToplevel):
                      ).grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 12))
 
         # the list
-        self.list_frame = ctk.CTkScrollableFrame(self, fg_color=("gray94", "gray13"),
-                                                  label_text="Songs to download")
-        self.list_frame.grid(row=2, column=0, sticky="nsew", padx=18, pady=4)
+        ctk.CTkLabel(self, text="Songs to download", text_color=MUTED,
+                     font=ctk.CTkFont(size=12, weight="bold"), anchor="w").grid(
+            row=2, column=0, sticky="w", padx=22, pady=(2, 0))
+        self.list_frame = ctk.CTkScrollableFrame(self, fg_color=("gray94", "gray13"), label_text="")
+        self.list_frame.grid(row=3, column=0, sticky="nsew", padx=18, pady=(2, 4))
         self.list_frame.grid_columnconfigure(0, weight=1)
 
         # actions
         actions = ctk.CTkFrame(self, fg_color="transparent")
-        actions.grid(row=3, column=0, sticky="ew", padx=18, pady=(8, 2))
+        actions.grid(row=4, column=0, sticky="ew", padx=18, pady=(8, 2))
         actions.grid_columnconfigure((0, 1), weight=1)
         self.get_btn = ctk.CTkButton(actions, text="Get info for all  →", height=44,
                                      font=ctk.CTkFont(size=15, weight="bold"),
@@ -227,11 +233,24 @@ class BulkWindow(ctk.CTkToplevel):
         self.download_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
         self.progress = ctk.CTkProgressBar(self, progress_color=PINK)
-        self.progress.grid(row=4, column=0, sticky="ew", padx=18, pady=(8, 2))
+        self.progress.grid(row=5, column=0, sticky="ew", padx=18, pady=(8, 2))
         self.progress.set(0)
         self.status_var = tk.StringVar(value="Add some YouTube links to get started.")
         ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", justify="left",
-                     wraplength=740, text_color=MUTED).grid(row=5, column=0, sticky="ew", padx=18, pady=(0, 14))
+                     wraplength=740, text_color=MUTED).grid(row=6, column=0, sticky="ew", padx=18, pady=(0, 14))
+
+    def _set_icon(self) -> None:
+        try:
+            ico = resource_path("assets/icon.ico")
+            if sys.platform == "win32" and ico.exists():
+                self.iconbitmap(str(ico))
+            else:
+                png = resource_path("assets/icon.png")
+                if png.exists():
+                    self._iconimg = tk.PhotoImage(file=str(png))
+                    self.iconphoto(False, self._iconimg)
+        except Exception:
+            pass
 
     # ---- progress bar helpers ----
     def _bar_indeterminate(self) -> None:
