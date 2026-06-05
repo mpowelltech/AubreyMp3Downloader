@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# PyInstaller output + bundled binaries fetched at build time
+build/
+dist/
+*.spec.bak
+ffmpeg.zip
+ffmpeg_extract/
+
+# Smoke-test output
+smoke_out.mp3
+*.mp3

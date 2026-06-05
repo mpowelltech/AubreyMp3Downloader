@@ -1,0 +1,4 @@
+# Runtime dependency for the GUI. yt-dlp and ffmpeg are NOT pip deps:
+#   - ffmpeg is bundled into the exe at build time (see the CI workflow)
+#   - yt-dlp is downloaded/auto-updated at runtime (see app/updater.py)
+customtkinter>=5.2.2
