@@ -193,7 +193,7 @@ class App(ctk.CTk):
         try:  # logo next to the title (skipped gracefully if Pillow is missing)
             from PIL import Image
             self._logo = ctk.CTkImage(
-                light_image=Image.open(resource_path("assets/icon_header.png")), size=(48, 48))
+                light_image=Image.open(resource_path("assets/icon_header.png")), size=(60, 60))
             ctk.CTkLabel(header, text="", image=self._logo).grid(row=0, column=0, padx=(0, 10))
             tcol, ncol = 1, 2
         except Exception:

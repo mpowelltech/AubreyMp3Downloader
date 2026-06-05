@@ -224,6 +224,9 @@ def _spawn_replacer(current: Path, new: Path) -> None:
         "ping -n 2 127.0.0.1 >NUL\r\n"
         "goto retry\r\n"
         ":launch\r\n"
+        # Clear _MEIPASS2 so the relaunched one-file exe extracts fresh instead
+        # of inheriting our (now-deleted) temp dir -> "Failed to load Python DLL".
+        'set "_MEIPASS2="\r\n'
         'start "" "%DST%"\r\n'
         'del "%~f0"\r\n'
     )
