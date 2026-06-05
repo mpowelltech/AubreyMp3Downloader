@@ -25,17 +25,47 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Section "Project root: $ProjectRoot"
 
 # --- 1. Ensure an x64 Python ------------------------------------------------
-function Find-X64Python {
-    $cands = @(
-        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
-        "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe"
+function Update-PathEnv {
+    # Pull the latest Machine + User PATH into this session (after an install).
+    $m = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    $u = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = (@($m, $u) | Where-Object { $_ }) -join ";"
+}
+
+function Get-PythonCandidates {
+    $list = @()
+    Update-PathEnv
+    # The py launcher knows about every registered install.
+    if (Get-Command py.exe -ErrorAction SilentlyContinue) {
+        try {
+            foreach ($line in (& py.exe -0p 2>$null)) {
+                if ($line -match '([A-Za-z]:\\[^\r\n]*?python\.exe)') { $list += $Matches[1] }
+            }
+        } catch {}
+    }
+    # Common per-user and machine install locations (any 3.x).
+    $globs = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe",
+        "$env:ProgramFiles\Python3*\python.exe",
+        "${env:ProgramW6432}\Python3*\python.exe",
+        "C:\Python3*\python.exe"
     )
-    $cands += @(Get-Command python.exe -All -ErrorAction SilentlyContinue | ForEach-Object Source)
-    foreach ($p in ($cands | Select-Object -Unique)) {
-        if ($p -and (Test-Path $p)) {
-            try { $m = (& $p -c "import platform;print(platform.machine())" 2>$null).Trim() } catch { $m = "" }
-            if ($m -eq "AMD64") { return $p }
-        }
+    foreach ($g in $globs) {
+        $list += @(Get-ChildItem -Path $g -ErrorAction SilentlyContinue | ForEach-Object FullName)
+    }
+    # Anything on PATH, minus the Microsoft Store stub (which would open the Store).
+    $list += @(Get-Command python.exe -All -ErrorAction SilentlyContinue | ForEach-Object Source)
+    $list | Where-Object { $_ -and ($_ -notlike "*WindowsApps*") } | Select-Object -Unique
+}
+
+function Test-PyArch($p) {
+    if (-not (Test-Path $p)) { return "" }
+    try { return (& $p -c "import platform;print(platform.machine())" 2>$null).Trim() } catch { return "" }
+}
+
+function Find-X64Python {
+    foreach ($p in (Get-PythonCandidates)) {
+        if ((Test-PyArch $p) -eq "AMD64") { return $p }
     }
     return $null
 }
@@ -53,7 +83,7 @@ if (-not $py) {
         } catch { Write-Host "winget failed: $_" }
     }
     if (-not $ok) {
-        $url = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe"
+        $url = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
         $dl  = "$env:TEMP\python-amd64.exe"
         Write-Host "Falling back to direct download: $url"
         Invoke-WebRequest -Uri $url -OutFile $dl
@@ -62,7 +92,11 @@ if (-not $py) {
     }
     $py = Find-X64Python
 }
-if (-not $py) { throw "Could not find or install an x64 Python." }
+if (-not $py) {
+    Write-Host "`nStill could not find an x64 Python. Here's what I did find:" -ForegroundColor Red
+    foreach ($p in (Get-PythonCandidates)) { Write-Host ("  [{0,-7}] {1}" -f (Test-PyArch $p), $p) }
+    throw "Could not find or install an x64 Python."
+}
 Write-Host ("Using Python: {0}  ({1})" -f $py, (& $py -c "import platform,sys;print(platform.machine(), sys.version.split()[0])")) -ForegroundColor Green
 
 # --- 2. Copy project to a fast local working folder -------------------------
