@@ -210,7 +210,7 @@ class BulkView(ctk.CTkFrame):
         # Fixed height keeps the window compact no matter how many songs are
         # added — extra rows scroll. (height is widget-scaled by customtkinter.)
         self.list_frame = ctk.CTkScrollableFrame(self, fg_color=("gray94", "gray13"),
-                                                 label_text="", height=240)
+                                                 label_text="", height=220)
         self.list_frame.grid(row=3, column=0, sticky="nsew", padx=18, pady=(2, 4))
         self.list_frame.grid_columnconfigure(0, weight=1)
 

@@ -63,14 +63,14 @@ touch Tk widgets from a worker thread.**
   fresh PCs); ffmpeg presence is verified at startup; and any setup failure drops
   to a locked `"failed"` state with a Retry prompt — the app refuses to proceed
   without its tools (`_verify_ffmpeg`, `_on_setup_error`, `_start_engine`).
-- **HiDPI sizing:** customtkinter's `CTk.geometry("WxH")` multiplies W/H by the
-  display DPI factor, so hardcoded sizes oversize on HiDPI Windows. Instead,
-  `App._fit_window()` measures content via `winfo_reqheight()` (already physical
-  px) and writes RAW `tk.Tk.geometry(self, ...)` (bypassing the CTk multiplier),
-  clamped to the screen. The bulk list (`CTkScrollableFrame`, fixed `height`)
-  scrolls so the window stays compact regardless of song count. Don't hardcode
-  window geometries; call `_fit_window`. (Edge: moving across monitors of
-  different DPI won't auto-refit — fine for a single-screen target.)
+- **HiDPI sizing:** customtkinter's `CTk.geometry("WxH")` takes LOGICAL pixels
+  and multiplies them by the display DPI factor → physical px. So pass logical
+  sizes (760x560 single, 760x600 bulk) and it scales correctly on HiDPI. Do NOT
+  measure `winfo_reqheight()` at `__init__` and raw-set it: before the window
+  maps to a monitor the DPI is unknown, so reqheight comes back LOGICAL and the
+  window ends up ~1/DPI too small (this caused a regression). Keep the bulk songs
+  list a fixed-height `CTkScrollableFrame` so its content stays compact (scrolls)
+  regardless of song count — that's what fixes the "bulk too tall" case.
 - **Self-replacing updater:** the swap script retries `move /Y` until the old
   exe's lock releases (a one-file app is a *child* of the bootloader, which holds
   the .exe briefly after exit) and runs hidden via `CREATE_NO_WINDOW`. A given
