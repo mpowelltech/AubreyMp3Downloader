@@ -117,8 +117,8 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title(APP_TITLE)
-        self.geometry("660x680")
-        self.minsize(640, 680)
+        self.geometry("660x735")
+        self.minsize(640, 735)
         self.configure(fg_color=WINDOW_BG)
         self._apply_icon()
 
@@ -440,11 +440,11 @@ class App(ctk.CTk):
         if self._bulk is not None:
             self._bulk.destroy()
             self._bulk = None
-        self.minsize(640, 680)
+        self.minsize(640, 735)
         try:
-            self.geometry(self._saved_geometry or "660x680")
+            self.geometry(self._saved_geometry or "660x735")
         except Exception:
-            self.geometry("660x680")
+            self.geometry("660x735")
 
     def _sync_set(self, var, value) -> None:
         """Set one trim var without retriggering the opposite mirror handler."""

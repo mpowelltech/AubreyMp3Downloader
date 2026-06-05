@@ -92,6 +92,29 @@ options:
   proper **x64** exe (so it runs on a normal PC) by using x64 Python under
   emulation.
 
+### Releasing a new version
+
+Releases are built automatically by GitHub Actions. To cut one, push a version
+tag (`v` followed by the version):
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+That triggers the **Build Windows EXE** workflow, which builds the x64 exe and
+publishes a **GitHub Release** named after the tag with the exe attached and
+auto-generated notes. Send your sister-in-law the link to that release's
+`Aubreys-YT-MP3-Downloader.exe` (under **Assets**), or download it yourself and
+pass it on.
+
+Bump the number for each release (`v1.0.1`, `v1.1.0`, ...). To rebuild without
+making a release, open the **Actions** tab and run the workflow manually
+(**Run workflow**); the exe lands under that run's **Artifacts**.
+
+Tip: rebuild and release whenever YouTube changes break things — though because
+the app auto-updates yt-dlp on launch, that's rarely needed.
+
 ### Notes
 
 * The bundled ffmpeg is a GPL static build (BtbN). Distribute accordingly.
