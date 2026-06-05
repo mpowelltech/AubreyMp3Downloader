@@ -13,7 +13,19 @@
     4. Builds a single-file x64 .exe with PyInstaller.
     5. Copies the .exe into the project's _winbuild_out\ folder
        (which shows up on your Mac), then launches it to test.
+
+  Heavy inputs (ffmpeg, the venv) are cached under %LOCALAPPDATA%\AubreyMp3Build
+  and reused between runs - only your source is re-copied and the exe re-built.
+
+  Options (advanced):
+    -RefreshFfmpeg   ignore the cached ffmpeg and download a fresh one
+    -Clean           wipe the cached venv + ffmpeg + work dir and start over
 #>
+
+param(
+    [switch]$RefreshFfmpeg,
+    [switch]$Clean
+)
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -116,40 +128,72 @@ if (-not $py) {
 }
 Write-Host ("Using Python: {0}  ({1}, v{2})" -f $py, (Get-ArchName (Get-PEMachine $py)), (& $py -c "import sys;print(sys.version.split()[0])")) -ForegroundColor Green
 
-# --- 2. Copy project to a fast local working folder -------------------------
-Section "Copying project to a local working folder"
-$Work = "$env:USERPROFILE\AubreyMp3Build"
+# --- Persistent locations (these survive between runs) ----------------------
+$Root  = "$env:LOCALAPPDATA\AubreyMp3Build"
+$Cache = "$Root\cache"     # cached ffmpeg.exe (downloaded once)
+$Venv  = "$Root\venv"      # reusable virtualenv
+$Work  = "$Root\work"      # rebuilt each run: source copy + dist
+if ($Clean -and (Test-Path $Root)) {
+    Section "Clean: removing cached venv + ffmpeg + work dir"
+    Remove-Item -Recurse -Force $Root
+}
+New-Item -ItemType Directory -Force -Path $Cache | Out-Null
+
+# --- 2. Static x64 ffmpeg (cached - downloaded once) ------------------------
+Section "Ensuring static x64 ffmpeg"
+$ffCached = "$Cache\ffmpeg.exe"
+if ($RefreshFfmpeg -and (Test-Path $ffCached)) { Remove-Item -Force $ffCached }
+if (Test-Path $ffCached) {
+    Write-Host ("Using cached ffmpeg ({0:N1} MB) - skipping download." -f ((Get-Item $ffCached).Length / 1MB)) -ForegroundColor Green
+} else {
+    $ffUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+    $ffZip = "$Cache\ffmpeg.zip"
+    $ffTmp = "$Cache\ffmpeg_extract"
+    Write-Host "Downloading ffmpeg (one-time, ~180 MB)..."
+    Invoke-WebRequest -Uri $ffUrl -OutFile $ffZip
+    if (Test-Path $ffTmp) { Remove-Item -Recurse -Force $ffTmp }
+    Expand-Archive -Path $ffZip -DestinationPath $ffTmp -Force
+    $ff = Get-ChildItem -Path $ffTmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+    if (-not $ff) { throw "ffmpeg.exe not found in download" }
+    Copy-Item $ff.FullName $ffCached -Force
+    Remove-Item -Force $ffZip; Remove-Item -Recurse -Force $ffTmp
+    Write-Host ("Cached ffmpeg for next time ({0:N1} MB)." -f ((Get-Item $ffCached).Length / 1MB)) -ForegroundColor Green
+}
+
+# --- 3. Reusable venv (only reinstalls deps when requirements change) -------
+Section "Preparing virtualenv"
+$vpy = "$Venv\Scripts\python.exe"
+if (-not (Test-Path $vpy)) {
+    Write-Host "Creating venv (one-time)..."
+    & $py -m venv $Venv;                                  Check "venv creation"
+}
+$reqHash  = (Get-FileHash "$ProjectRoot\requirements.txt" -Algorithm SHA256).Hash + ":pyinstaller"
+$hashFile = "$Venv\.deps.sha256"
+if ((Test-Path $hashFile) -and ((Get-Content $hashFile -Raw).Trim() -eq $reqHash)) {
+    Write-Host "Dependencies already up to date - skipping install." -ForegroundColor Green
+} else {
+    Write-Host "Installing / updating dependencies..."
+    & $vpy -m pip install --upgrade pip --quiet;          Check "pip upgrade"
+    & $vpy -m pip install --quiet -r "$ProjectRoot\requirements.txt" pyinstaller; Check "pip install deps"
+    Set-Content -Path $hashFile -Value $reqHash
+    Write-Host "Dependencies installed" -ForegroundColor Green
+}
+
+# --- 4. Copy source into a clean work folder, drop in the cached ffmpeg ------
+Section "Copying source to a clean work folder"
 if (Test-Path $Work) { Remove-Item -Recurse -Force $Work }
-New-Item -ItemType Directory -Force -Path $Work | Out-Null
+New-Item -ItemType Directory -Force -Path "$Work\build" | Out-Null
 robocopy "$ProjectRoot" "$Work" /E /NFL /NDL /NJH /NJS /NP `
     /XD ".git" ".venv" "build" "dist" "__pycache__" "_winbuild_out" "ffmpeg_extract" /XF "*.mp3" | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed (exit $LASTEXITCODE)" }
 $global:LASTEXITCODE = 0
-Write-Host "Copied to $Work" -ForegroundColor Green
+Copy-Item $ffCached "$Work\build\ffmpeg.exe" -Force
+Write-Host "Source ready in $Work" -ForegroundColor Green
 
+# --- 5. Build ---------------------------------------------------------------
+Section "Building the exe with PyInstaller"
 Push-Location $Work
 try {
-    # --- 3. venv + dependencies --------------------------------------------
-    Section "Creating venv and installing dependencies"
-    & $py -m venv .venv;                                  Check "venv creation"
-    $vpy = "$Work\.venv\Scripts\python.exe"
-    & $vpy -m pip install --upgrade pip --quiet;          Check "pip upgrade"
-    & $vpy -m pip install --quiet -r requirements.txt pyinstaller; Check "pip install deps"
-    Write-Host "Dependencies installed" -ForegroundColor Green
-
-    # --- 4. Fetch a static x64 ffmpeg --------------------------------------
-    Section "Downloading static x64 ffmpeg"
-    $ffUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-    Invoke-WebRequest -Uri $ffUrl -OutFile "$Work\ffmpeg.zip"
-    Expand-Archive -Path "$Work\ffmpeg.zip" -DestinationPath "$Work\ffmpeg_extract" -Force
-    $ff = Get-ChildItem -Path "$Work\ffmpeg_extract" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-    if (-not $ff) { throw "ffmpeg.exe not found in download" }
-    New-Item -ItemType Directory -Force -Path "$Work\build" | Out-Null
-    Copy-Item $ff.FullName "$Work\build\ffmpeg.exe" -Force
-    Write-Host "Bundled ffmpeg from $($ff.FullName)" -ForegroundColor Green
-
-    # --- 5. Build -----------------------------------------------------------
-    Section "Building the exe with PyInstaller"
     & $vpy -m PyInstaller --noconfirm AubreyMp3.spec;     Check "PyInstaller build"
 }
 finally { Pop-Location }
