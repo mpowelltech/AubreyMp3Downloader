@@ -185,10 +185,16 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             titles, text="Turn a YouTube song into an MP3 for the Yoto player.",
             text_color=MUTED, font=ctk.CTkFont(size=13)).pack(anchor="w")
+        right = ctk.CTkFrame(header, fg_color="transparent")
+        right.grid(row=0, column=ncol, sticky="e", padx=(8, 0))
+        self.several_btn = ctk.CTkButton(
+            right, text="≡  Several songs", width=132, fg_color=SECONDARY,
+            hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_several)
+        self.several_btn.pack(fill="x")
         self.new_btn = ctk.CTkButton(
-            header, text="↺  New video", width=110, fg_color=SECONDARY,
+            right, text="↺  New video", width=132, fg_color=SECONDARY,
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_new)
-        self.new_btn.grid(row=0, column=ncol, sticky="e", padx=(8, 0))
+        self.new_btn.pack(fill="x", pady=(6, 0))
 
         # --- Step 1: link ---
         b1 = self._step(1, 1, "Paste a YouTube link")
@@ -257,10 +263,10 @@ class App(ctk.CTk):
         self.skiplast_entry = ctk.CTkEntry(quick, textvariable=self.skiplast_var, width=52)
         self.skiplast_entry.grid(row=0, column=4)
         ctk.CTkLabel(quick, text="sec").grid(row=0, column=5, padx=(4, 0))
-        # Auto-apply to Start/End when you press Enter or move away — no confirm button.
-        for ent, fn in ((self.skipfirst_entry, self._skip_first), (self.skiplast_entry, self._skip_last)):
-            ent.bind("<Return>", lambda _e, f=fn: f())
-            ent.bind("<FocusOut>", lambda _e, f=fn: f())
+        # Apply to Start/End the instant the number changes (covers Enter, Tab,
+        # and clicking anywhere outside the box) — no confirm button needed.
+        self.skipfirst_var.trace_add("write", lambda *_: self._skip_first())
+        self.skiplast_var.trace_add("write", lambda *_: self._skip_last())
         ctk.CTkLabel(
             b3, text="Optional. Set Start/End, or type seconds in Skip first/last and press Enter.",
             text_color=MUTED, font=ctk.CTkFont(size=12)).grid(row=2, column=0, sticky="w", pady=(8, 0))
@@ -352,6 +358,8 @@ class App(ctk.CTk):
         self._enable(self._step3_widgets, loaded)
         self._set_action(self.download_btn, loaded)
         self.new_btn.configure(state="normal" if loaded else "disabled")
+        self.several_btn.configure(
+            state="normal" if (self.ready and state in ("empty", "loaded", "done")) else "disabled")
 
         for n, kind in _BADGES[state].items():
             self._set_badge(n, kind)
@@ -399,6 +407,17 @@ class App(ctk.CTk):
         self._set_state("empty")
         self._status("Ready. Paste a YouTube link above.")
         self.url_entry.focus_set()
+
+    def _on_several(self) -> None:
+        if not self.ready or self.flow_state in ("starting", "loading", "downloading"):
+            return
+        from .bulk import BulkWindow  # lazy import avoids a circular import at startup
+        try:
+            self.withdraw()
+            BulkWindow(self)
+        except Exception as e:
+            self.deiconify()
+            messagebox.showerror(APP_TITLE, f"Couldn't open bulk mode.\n\n{e}")
 
     def _skip_first(self) -> None:
         if self.flow_state not in ("loaded", "done"):

@@ -22,8 +22,10 @@ app/
                        #   downloads yt-dlp.exe + deno.exe; dev uses PATH)
   downloader.py        # shells out to yt-dlp: fetch_info() + download_audio()
   audio.py             # shells out to ffmpeg: make_mp3() — trim, encode, tag, cover
-  main.py              # customtkinter GUI; workers -> queue -> Tk main loop
+  main.py              # single-song GUI; state machine; workers -> queue -> Tk loop
+  bulk.py              # "Several songs" window: add a list, fetch all, download all
 scripts/smoke.py       # headless pipeline test (no GUI)
+scripts/run_mac.command # run from source on macOS (no exe build) for quick UI testing
 AubreyMp3.spec         # PyInstaller --onefile spec
 .github/workflows/build.yml  # Windows runner: fetch ffmpeg -> pyinstaller -> artifact
 ```
@@ -55,6 +57,18 @@ touch Tk widgets from a worker thread.**
   PyInstaller cannot cross-compile from macOS.
 - **Packaging hygiene:** `--onefile`, `console=False`, **UPX off** (UPX worsens
   antivirus false positives). Unsigned exe ⇒ one-time SmartScreen prompt.
+
+## Bulk mode (app/bulk.py)
+
+`BulkWindow` (a CTkToplevel opened from the single screen's "Several songs"
+button; the single window withdraws while it's open). Reuses the same engine
+(`app.ytdlp` / `app.deno`) and the same per-song pipeline. Flow: add links (one
+`BulkRow` each) → "Get info for all" (ThreadPoolExecutor, 3 workers, metadata
+only) → edit title/Start/End per row → "Download all" (sequential; pick one
+folder; per-row status + overall progress). Same gating philosophy: actions
+light up only when usable, everything locks during a run, failed rows are
+skipped, trim is validated on the main thread before the worker starts (workers
+never touch Tk vars — values are snapshotted into plain dicts first).
 
 ## Dev workflow
 
