@@ -12,9 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.audio import make_mp3                       # noqa: E402
-from app.downloader import download_audio, fetch_info  # noqa: E402
-from app.updater import ensure_ytdlp                 # noqa: E402
+from app.audio import make_mp3                            # noqa: E402
+from app.downloader import download_audio, fetch_info     # noqa: E402
+from app.updater import ensure_deno, ensure_ytdlp         # noqa: E402
 
 
 def main() -> None:
@@ -22,12 +22,14 @@ def main() -> None:
     out = Path(sys.argv[2]) if len(sys.argv) > 2 else Path("smoke_out.mp3")
 
     ytdlp = ensure_ytdlp(status=print)
-    info = fetch_info(ytdlp, url)
+    deno = ensure_deno(status=print)
+    print(f"yt-dlp: {ytdlp}\ndeno:   {deno}")
+    info = fetch_info(ytdlp, url, deno)
     print(f"Title: {info.title!r}  Duration: {info.duration}s  Thumb: {bool(info.thumbnail)}")
 
     with tempfile.TemporaryDirectory() as tmp:
         audio, thumb = download_audio(
-            ytdlp, url, Path(tmp),
+            ytdlp, url, Path(tmp), deno=deno,
             on_progress=lambda p: print(f"\rDownloading… {p:5.1f}%", end=""),
         )
         print()

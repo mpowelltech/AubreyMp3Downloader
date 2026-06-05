@@ -18,8 +18,8 @@ pipeline is fully testable on the Mac; only producing the `.exe` needs Windows.
 run.py                 # entry point -> app.main:main
 app/
   paths.py             # dev-vs-frozen resource paths; ffmpeg/cache locations
-  updater.py           # ensure + auto-update yt-dlp (Windows downloads yt-dlp.exe;
-                       #   dev uses yt-dlp from PATH)
+  updater.py           # ensure + auto-update yt-dlp AND ensure deno (Windows
+                       #   downloads yt-dlp.exe + deno.exe; dev uses PATH)
   downloader.py        # shells out to yt-dlp: fetch_info() + download_audio()
   audio.py             # shells out to ffmpeg: make_mp3() — trim, encode, tag, cover
   main.py              # customtkinter GUI; workers -> queue -> Tk main loop
@@ -41,6 +41,11 @@ touch Tk widgets from a worker thread.**
   to the binary (not the Python module) precisely so it can self-update.
 - **ffmpeg IS bundled** into the exe (stable, no auto-update needed). Passed to
   yt-dlp via `--ffmpeg-location` and invoked directly by `audio.py`.
+- **Deno is required, not optional.** YouTube's JS "n" challenge means yt-dlp
+  needs a JS runtime or many videos fail with "This video is not available".
+  We download `deno.exe` once (like yt-dlp) and pass `--js-runtimes deno:<path>`
+  plus `--remote-components ejs:github` (downloader `_engine_args`). The official
+  yt-dlp.exe bundles the EJS solver scripts; deno is the missing piece.
 - **Trim UX:** Start/End fields (mm:ss) are the source of truth; the "Skip
   first/last" buttons just fill those fields. ffmpeg does the actual cut
   (`-ss` input seek + `-t` output duration), re-encoding so it's accurate.

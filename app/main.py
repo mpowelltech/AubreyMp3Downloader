@@ -1,9 +1,15 @@
 """Aubrey's YT-MP3 Downloader — paste a YouTube link, trim, export an MP3.
 
-Single-window customtkinter app.  All slow work (resolving yt-dlp, fetching
-info, downloading, converting) runs on worker threads; they post messages to a
-thread-safe queue that the Tk main loop drains via ``after`` so the UI stays
-responsive and we never touch widgets off the main thread.
+Single-window customtkinter app with a clear numbered flow:
+    1. paste a link (details load automatically)
+    2. check the title
+    3. trim (optional)
+    4. download
+
+All slow work (resolving yt-dlp/deno, fetching info, downloading, converting)
+runs on worker threads; they post messages to a thread-safe queue that the Tk
+main loop drains via ``after`` so the UI stays responsive and we never touch
+widgets off the main thread.
 """
 
 from __future__ import annotations
@@ -22,9 +28,13 @@ import customtkinter as ctk
 
 from .audio import make_mp3
 from .downloader import DownloadError, VideoInfo, download_audio, fetch_info
-from .updater import ensure_ytdlp, update_in_background
+from .updater import ensure_deno, ensure_ytdlp, update_in_background
 
 APP_TITLE = "Aubrey's YT-MP3 Downloader"
+ACCENT = ("#3B8ED0", "#1F6AA5")
+GO_GREEN = ("#2FA572", "#2FA572")
+GO_GREEN_HOVER = ("#268A61", "#217954")
+MUTED = ("gray45", "gray60")
 
 
 # --------------------------------------------------------------------------- #
@@ -83,104 +93,143 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title(APP_TITLE)
-        self.geometry("580x460")
-        self.minsize(560, 460)
+        self.geometry("660x640")
+        self.minsize(640, 640)
 
         self.info: VideoInfo | None = None
         self.ytdlp: str | None = None
+        self.deno: str | None = None
+        self.ready = False
         self.busy = False
+        self.loaded_url: str | None = None
         self.q: "queue.Queue[tuple[str, object]]" = queue.Queue()
 
         self._build_ui()
         self.after(100, self._poll)
-        threading.Thread(target=self._init_ytdlp, daemon=True).start()
+        threading.Thread(target=self._init_engine, daemon=True).start()
 
     # ---- UI construction ------------------------------------------------- #
 
+    def _step(self, row: int, number: int, title: str) -> ctk.CTkFrame:
+        """Create a numbered 'step' card and return its body frame to fill."""
+        card = ctk.CTkFrame(self, corner_radius=10)
+        card.grid(row=row, column=0, sticky="ew", padx=18, pady=7)
+        card.grid_columnconfigure(0, weight=1)
+
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 0))
+        ctk.CTkLabel(
+            head, text=str(number), width=26, height=26, corner_radius=13,
+            fg_color=ACCENT, text_color="white", font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, padx=(0, 10))
+        ctk.CTkLabel(head, text=title, font=ctk.CTkFont(size=15, weight="bold")).grid(
+            row=0, column=1, sticky="w")
+
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="ew", padx=14, pady=(8, 14))
+        body.grid_columnconfigure(0, weight=1)
+        return body
+
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        pad = {"padx": 16, "pady": 6}
 
+        # --- Header ---
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 2))
+        ctk.CTkLabel(header, text=APP_TITLE, font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w")
         ctk.CTkLabel(
-            self, text=APP_TITLE, font=ctk.CTkFont(size=20, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 2))
+            header, text="Turn a YouTube song into an MP3 for the Yoto player.",
+            text_color=MUTED, font=ctk.CTkFont(size=13),
+        ).pack(anchor="w")
 
-        # --- URL row ---
-        url_row = ctk.CTkFrame(self, fg_color="transparent")
-        url_row.grid(row=1, column=0, sticky="ew", **pad)
-        url_row.grid_columnconfigure(0, weight=1)
+        # --- Step 1: link ---
+        b1 = self._step(1, 1, "Paste a YouTube link")
+        row1 = ctk.CTkFrame(b1, fg_color="transparent")
+        row1.grid(row=0, column=0, sticky="ew")
+        row1.grid_columnconfigure(0, weight=1)
         self.url_var = tk.StringVar()
-        ctk.CTkEntry(
-            url_row, textvariable=self.url_var, placeholder_text="Paste a YouTube link…",
-        ).grid(row=0, column=0, sticky="ew")
-        self.paste_btn = ctk.CTkButton(url_row, text="Paste", width=70, command=self._on_paste)
+        self.url_entry = ctk.CTkEntry(row1, textvariable=self.url_var, placeholder_text="https://www.youtube.com/watch?v=…")
+        self.url_entry.grid(row=0, column=0, sticky="ew")
+        self.url_entry.bind("<Return>", lambda _e: self._on_fetch())
+        self.paste_btn = ctk.CTkButton(row1, text="Paste", width=72, command=self._on_paste)
         self.paste_btn.grid(row=0, column=1, padx=(8, 0))
-        self.fetch_btn = ctk.CTkButton(url_row, text="Fetch info", width=90, command=self._on_fetch)
+        self.fetch_btn = ctk.CTkButton(row1, text="Get info", width=84, command=self._on_fetch)
         self.fetch_btn.grid(row=0, column=2, padx=(8, 0))
-
-        # --- Title row ---
-        title_row = ctk.CTkFrame(self, fg_color="transparent")
-        title_row.grid(row=2, column=0, sticky="ew", **pad)
-        title_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(title_row, text="Title").grid(row=0, column=0, padx=(0, 8))
-        self.title_var = tk.StringVar()
-        ctk.CTkEntry(
-            title_row, textvariable=self.title_var, placeholder_text="(song title)",
-        ).grid(row=0, column=1, sticky="ew")
-        self.length_var = tk.StringVar(value="Length: —")
-        ctk.CTkLabel(title_row, textvariable=self.length_var, width=110).grid(row=0, column=2, padx=(8, 0))
-
-        # --- Trim section ---
-        trim = ctk.CTkFrame(self)
-        trim.grid(row=3, column=0, sticky="ew", **pad)
-        for c in range(4):
-            trim.grid_columnconfigure(c, weight=1)
         ctk.CTkLabel(
-            trim, text="Trim", font=ctk.CTkFont(weight="bold"),
-        ).grid(row=0, column=0, columnspan=4, sticky="w", padx=12, pady=(8, 2))
+            b1, text="Copy the link from YouTube, click Paste — the song details load automatically.",
+            text_color=MUTED, font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
-        ctk.CTkLabel(trim, text="Start (mm:ss)").grid(row=1, column=0, sticky="e", padx=6)
+        # --- Step 2: title ---
+        b2 = self._step(2, 2, "Check the song title")
+        row2 = ctk.CTkFrame(b2, fg_color="transparent")
+        row2.grid(row=0, column=0, sticky="ew")
+        row2.grid_columnconfigure(0, weight=1)
+        self.title_var = tk.StringVar()
+        ctk.CTkEntry(row2, textvariable=self.title_var, placeholder_text="(loads after you paste a link)").grid(
+            row=0, column=0, sticky="ew")
+        self.length_var = tk.StringVar(value="Length: —")
+        ctk.CTkLabel(row2, textvariable=self.length_var, width=110, text_color=MUTED).grid(row=0, column=1, padx=(10, 0))
+        ctk.CTkLabel(
+            b2, text="This is the name that shows under the track in the Yoto app — edit it if you like.",
+            text_color=MUTED, font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        # --- Step 3: trim ---
+        b3 = self._step(3, 3, "Trim the song  (optional)")
+        times = ctk.CTkFrame(b3, fg_color="transparent")
+        times.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(times, text="Start").grid(row=0, column=0, padx=(0, 6))
         self.start_var = tk.StringVar(value="0:00")
-        ctk.CTkEntry(trim, textvariable=self.start_var, width=90).grid(row=1, column=1, sticky="w")
-        ctk.CTkLabel(trim, text="End (mm:ss)").grid(row=1, column=2, sticky="e", padx=6)
+        ctk.CTkEntry(times, textvariable=self.start_var, width=80).grid(row=0, column=1)
+        ctk.CTkLabel(times, text="End").grid(row=0, column=2, padx=(18, 6))
         self.end_var = tk.StringVar()
-        ctk.CTkEntry(trim, textvariable=self.end_var, width=90).grid(row=1, column=3, sticky="w")
+        ctk.CTkEntry(times, textvariable=self.end_var, width=80, placeholder_text="end").grid(row=0, column=3)
+        ctk.CTkLabel(times, text="(mm:ss)", text_color=MUTED).grid(row=0, column=4, padx=(8, 0))
 
-        ctk.CTkLabel(trim, text="Skip first").grid(row=2, column=0, sticky="e", padx=6, pady=(4, 10))
+        quick = ctk.CTkFrame(b3, fg_color="transparent")
+        quick.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        ctk.CTkLabel(quick, text="Skip first").grid(row=0, column=0, padx=(0, 6))
         self.skipfirst_var = tk.StringVar(value="0")
-        ctk.CTkEntry(trim, textvariable=self.skipfirst_var, width=60).grid(row=2, column=1, sticky="w", pady=(4, 10))
-        ctk.CTkButton(trim, text="↥ trim front", width=90, command=self._skip_first).grid(
-            row=2, column=1, sticky="e", padx=(0, 6), pady=(4, 10))
-        ctk.CTkLabel(trim, text="Skip last").grid(row=2, column=2, sticky="e", padx=6, pady=(4, 10))
+        ctk.CTkEntry(quick, textvariable=self.skipfirst_var, width=52).grid(row=0, column=1)
+        ctk.CTkButton(quick, text="sec ✓", width=58, command=self._skip_first).grid(row=0, column=2, padx=(4, 0))
+        ctk.CTkLabel(quick, text="Skip last").grid(row=0, column=3, padx=(18, 6))
         self.skiplast_var = tk.StringVar(value="0")
-        ctk.CTkEntry(trim, textvariable=self.skiplast_var, width=60).grid(row=2, column=3, sticky="w", pady=(4, 10))
-        ctk.CTkButton(trim, text="↧ trim end", width=90, command=self._skip_last).grid(
-            row=2, column=3, sticky="e", padx=(0, 6), pady=(4, 10))
+        ctk.CTkEntry(quick, textvariable=self.skiplast_var, width=52).grid(row=0, column=4)
+        ctk.CTkButton(quick, text="sec ✓", width=58, command=self._skip_last).grid(row=0, column=5, padx=(4, 0))
+        ctk.CTkLabel(
+            b3, text="Leave as-is to keep the whole song. Use 'Skip first/last' to cut an intro or outro.",
+            text_color=MUTED, font=ctk.CTkFont(size=12),
+        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
 
-        # --- Progress + status ---
+        # --- Step 4: download (primary action) ---
+        self.download_btn = ctk.CTkButton(
+            self, text="4   Download MP3", height=46,
+            font=ctk.CTkFont(size=16, weight="bold"),
+            fg_color=GO_GREEN, hover_color=GO_GREEN_HOVER, command=self._on_download)
+        self.download_btn.grid(row=4, column=0, sticky="ew", padx=18, pady=(12, 6))
+
+        # --- Footer: progress + status ---
         self.progress = ctk.CTkProgressBar(self)
-        self.progress.grid(row=4, column=0, sticky="ew", padx=16, pady=(10, 2))
+        self.progress.grid(row=5, column=0, sticky="ew", padx=18, pady=(4, 2))
         self.progress.set(0)
         self.status_var = tk.StringVar(value="Starting up…")
-        ctk.CTkLabel(self, textvariable=self.status_var, anchor="w").grid(
-            row=5, column=0, sticky="ew", padx=16)
+        ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", text_color=MUTED).grid(
+            row=6, column=0, sticky="ew", padx=18, pady=(0, 14))
 
-        # --- Download button ---
-        self.download_btn = ctk.CTkButton(
-            self, text="Download MP3", height=40,
-            font=ctk.CTkFont(size=15, weight="bold"), command=self._on_download)
-        self.download_btn.grid(row=6, column=0, sticky="ew", padx=16, pady=(10, 16))
+    # ---- background: resolve yt-dlp + deno ------------------------------- #
 
-    # ---- background: resolve yt-dlp -------------------------------------- #
-
-    def _init_ytdlp(self) -> None:
+    def _init_engine(self) -> None:
         try:
             cmd = ensure_ytdlp(status=lambda m: self.q.put(("status", m)))
             self.q.put(("ytdlp", cmd))
             update_in_background(cmd)
-            self.q.put(("status", "Ready — paste a YouTube link and click Fetch info."))
+            deno = ensure_deno(status=lambda m: self.q.put(("status", m)))
+            self.q.put(("deno", deno))
+            self.q.put(("ready", None))
+            self.q.put(("status", "Ready — paste a YouTube link above."))
         except Exception as e:
-            self.q.put(("error", f"Couldn't set up the downloader.\n\n{e}\n\n"
+            self.q.put(("error", f"Couldn't finish setting up.\n\n{e}\n\n"
                                  "Please check your internet connection and reopen the app."))
 
     # ---- button handlers -------------------------------------------------- #
@@ -189,7 +238,8 @@ class App(ctk.CTk):
         try:
             self.url_var.set(self.clipboard_get().strip())
         except tk.TclError:
-            pass
+            return
+        self._on_fetch()
 
     def _skip_first(self) -> None:
         try:
@@ -201,7 +251,7 @@ class App(ctk.CTk):
 
     def _skip_last(self) -> None:
         if not self.info:
-            messagebox.showinfo(APP_TITLE, "Click 'Fetch info' first so I know how long the video is.")
+            messagebox.showinfo(APP_TITLE, "Paste a link first so I know how long the song is.")
             return
         try:
             n = float(self.skiplast_var.get() or 0)
@@ -213,30 +263,34 @@ class App(ctk.CTk):
     def _on_fetch(self) -> None:
         url = self.url_var.get().strip()
         if not url:
-            messagebox.showinfo(APP_TITLE, "Please paste a YouTube link first.")
             return
-        if not self.ytdlp:
-            self._status("Still starting up… try again in a moment.")
+        if not self.ready:
+            self._status("Still starting up… one moment, then try again.")
             return
-        self._set_busy(True, "Reading video…")
+        if self.busy:
+            return
+        self._set_busy(True, "Reading song details…")
         threading.Thread(target=self._fetch_worker, args=(url,), daemon=True).start()
 
     def _fetch_worker(self, url: str) -> None:
         try:
-            self.q.put(("info", fetch_info(self.ytdlp, url)))
+            self.q.put(("info", (url, fetch_info(self.ytdlp, url, self.deno))))
         except DownloadError as e:
             self.q.put(("error", str(e)))
         except Exception as e:
-            self.q.put(("error", f"Couldn't read that video.\n\n{e}"))
+            self.q.put(("error", f"Couldn't read that link.\n\n{e}"))
         finally:
             self.q.put(("idle", None))
 
     def _on_download(self) -> None:
         url = self.url_var.get().strip()
         if not url:
-            messagebox.showinfo(APP_TITLE, "Please paste a YouTube link first.")
+            messagebox.showinfo(APP_TITLE, "Paste a YouTube link first (step 1).")
             return
-        if not self.ytdlp or self.busy:
+        if not self.ready:
+            self._status("Still starting up… one moment.")
+            return
+        if self.busy:
             return
         try:
             start = parse_time(self.start_var.get())
@@ -251,8 +305,7 @@ class App(ctk.CTk):
 
         display_title = self.title_var.get().strip() or "audio"
         dest = filedialog.asksaveasfilename(
-            title="Save MP3 as…",
-            defaultextension=".mp3",
+            title="Save MP3 as…", defaultextension=".mp3",
             initialfile=f"{safe_filename(display_title)}.mp3",
             filetypes=[("MP3 audio", "*.mp3")],
         )
@@ -274,7 +327,7 @@ class App(ctk.CTk):
                 tmpdir = Path(tmp)
                 self.q.put(("status", "Downloading audio…"))
                 audio, thumb = download_audio(
-                    self.ytdlp, url, tmpdir,
+                    self.ytdlp, url, tmpdir, deno=self.deno,
                     on_progress=lambda p: self.q.put(("progress", p / 100.0)),
                 )
                 self.q.put(("status", "Converting to MP3…"))
@@ -298,14 +351,19 @@ class App(ctk.CTk):
                     self._status(str(payload))
                 elif kind == "progress":
                     self.progress.configure(mode="determinate")
-                    self.progress.set(float(payload))
+                    self.progress.set(float(payload))  # type: ignore[arg-type]
                 elif kind == "busy_bar":
                     self.progress.configure(mode="indeterminate")
                     self.progress.start()
                 elif kind == "info":
-                    self._on_info(payload)  # type: ignore[arg-type]
+                    url, info = payload  # type: ignore[misc]
+                    self._on_info(url, info)
                 elif kind == "ytdlp":
                     self.ytdlp = str(payload)
+                elif kind == "deno":
+                    self.deno = payload  # type: ignore[assignment]
+                elif kind == "ready":
+                    self.ready = True
                 elif kind == "done":
                     self._on_done(Path(str(payload)))
                 elif kind == "error":
@@ -322,20 +380,21 @@ class App(ctk.CTk):
 
     # ---- state updates ---------------------------------------------------- #
 
-    def _on_info(self, info: VideoInfo) -> None:
+    def _on_info(self, url: str, info: VideoInfo) -> None:
         self.info = info
+        self.loaded_url = url
         self.title_var.set(info.title)
         self.length_var.set(f"Length: {fmt_time(info.duration)}")
         if not self.start_var.get().strip():
             self.start_var.set("0:00")
         self.end_var.set(fmt_time(info.duration))
-        self._status(f"Loaded: {info.title}")
+        self._status(f"✓ Loaded: {info.title}")
 
     def _on_done(self, path: Path) -> None:
         self.progress.stop()
         self.progress.configure(mode="determinate")
         self.progress.set(1.0)
-        self._status(f"Done! Saved {path.name}")
+        self._status(f"✓ Done! Saved {path.name}")
         if messagebox.askyesno(APP_TITLE, f"Saved:\n{path.name}\n\nOpen the folder?"):
             open_folder(path.parent)
 

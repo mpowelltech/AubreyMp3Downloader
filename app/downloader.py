@@ -36,12 +36,25 @@ def _no_window() -> dict:
     return {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
-def fetch_info(ytdlp: str, url: str) -> VideoInfo:
+def _engine_args(deno: Optional[str]) -> list[str]:
+    """Args that let yt-dlp solve YouTube's JS 'n' challenge.
+
+    ``--remote-components ejs:github`` lets yt-dlp fetch fresh EJS solver
+    scripts if its bundled ones are missing/stale; ``--js-runtimes deno:<path>``
+    points it at our downloaded Deno when it isn't on PATH.
+    """
+    args = ["--remote-components", "ejs:github"]
+    if deno:
+        args += ["--js-runtimes", f"deno:{deno}"]
+    return args
+
+
+def fetch_info(ytdlp: str, url: str, deno: Optional[str] = None) -> VideoInfo:
     """Read title/duration/thumbnail without downloading the media."""
     try:
         proc = subprocess.run(
-            [ytdlp, "-J", "--no-playlist", "--no-warnings", url],
-            capture_output=True, text=True, timeout=60, **_no_window(),
+            [ytdlp, "-J", "--no-playlist", "--no-warnings", *_engine_args(deno), url],
+            capture_output=True, text=True, timeout=120, **_no_window(),
         )
     except subprocess.TimeoutExpired:
         raise DownloadError("Timed out reading the video. Check your internet and try again.")
@@ -64,6 +77,7 @@ def download_audio(
     ytdlp: str,
     url: str,
     workdir: Path,
+    deno: Optional[str] = None,
     on_progress: Optional[Callable[[float], None]] = None,
 ) -> tuple[Path, Optional[Path]]:
     """Download best audio (+ a jpg thumbnail) into ``workdir``.
@@ -77,6 +91,7 @@ def download_audio(
         "-o", str(workdir / "audio.%(ext)s"),
         "--write-thumbnail", "--convert-thumbnails", "jpg",
         "--newline", "--progress-template", "dl:%(progress._percent_str)s",
+        *_engine_args(deno),
     ]
     loc = ffmpeg_location()
     if loc:
@@ -129,6 +144,10 @@ def _friendly(stderr: str) -> str:
         return "That video is private and can't be downloaded."
     if "age" in s and ("confirm your age" in s or "restricted" in s):
         return "That video is age-restricted and can't be downloaded here."
+    if any(t in s for t in ("challenge", "js runtime", "javascript runtime",
+                            "no solutions", "ejs", "[jsc]")):
+        return ("Couldn't process this video — the YouTube helper isn't ready yet.\n"
+                "Check your internet connection and reopen the app so it can finish setting up.")
     if "video unavailable" in s or "this video is not available" in s:
         return "That video is unavailable (it may be removed or region-locked)."
     if "is not a valid url" in s or "unsupported url" in s:
