@@ -130,8 +130,8 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title(APP_TITLE)
-        self.geometry("660x735")
-        self.minsize(640, 735)
+        self.geometry("760x550")
+        self.minsize(730, 525)
         self.configure(fg_color=WINDOW_BG)
         self._apply_icon()
 
@@ -156,93 +156,101 @@ class App(ctk.CTk):
 
     # ---- UI construction ------------------------------------------------- #
 
-    def _step(self, row: int, number: int, title: str) -> ctk.CTkFrame:
-        """Create a numbered 'step' card; store its badge/title; return its body."""
-        card = ctk.CTkFrame(self, corner_radius=12, fg_color=CARD_BG)
-        card.grid(row=row, column=0, sticky="ew", padx=18, pady=7)
+    def _step(self, parent, number: int, title: str) -> tuple:
+        """Create a numbered 'step' card; store its badge/title; return (card, body).
+
+        The caller grids the card, so cards can sit full-width or side-by-side.
+        """
+        card = ctk.CTkFrame(parent, corner_radius=10, fg_color=CARD_BG)
         card.grid_columnconfigure(0, weight=1)
 
         head = ctk.CTkFrame(card, fg_color="transparent")
-        head.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 0))
+        head.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 0))
         badge = ctk.CTkLabel(
-            head, text=str(number), width=28, height=28, corner_radius=14,
-            font=ctk.CTkFont(size=14, weight="bold"))
-        badge.grid(row=0, column=0, padx=(0, 10))
-        title_lbl = ctk.CTkLabel(head, text=title, font=ctk.CTkFont(size=15, weight="bold"))
+            head, text=str(number), width=24, height=24, corner_radius=12,
+            font=ctk.CTkFont(size=13, weight="bold"))
+        badge.grid(row=0, column=0, padx=(0, 8))
+        title_lbl = ctk.CTkLabel(head, text=title, font=ctk.CTkFont(size=14, weight="bold"))
         title_lbl.grid(row=0, column=1, sticky="w")
         self._badges[number] = badge
         self._titles[number] = title_lbl
 
         body = ctk.CTkFrame(card, fg_color="transparent")
-        body.grid(row=1, column=0, sticky="ew", padx=14, pady=(8, 14))
+        body.grid(row=1, column=0, sticky="ew", padx=12, pady=(5, 10))
         body.grid_columnconfigure(0, weight=1)
-        return body
+        return card, body
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
+        PADX = 14
 
-        # --- Header (logo + title + New video) ---
+        # --- Header (logo + title + actions) ---
         header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 2))
+        header.grid(row=0, column=0, sticky="ew", padx=PADX, pady=(10, 2))
         tcol, ncol = 0, 1
         try:  # logo next to the title (skipped gracefully if Pillow is missing)
             from PIL import Image
             self._logo = ctk.CTkImage(
-                light_image=Image.open(resource_path("assets/icon_header.png")), size=(56, 56))
-            ctk.CTkLabel(header, text="", image=self._logo).grid(row=0, column=0, padx=(0, 12))
+                light_image=Image.open(resource_path("assets/icon_header.png")), size=(48, 48))
+            ctk.CTkLabel(header, text="", image=self._logo).grid(row=0, column=0, padx=(0, 10))
             tcol, ncol = 1, 2
         except Exception:
             pass
         header.grid_columnconfigure(tcol, weight=1)
         titles = ctk.CTkFrame(header, fg_color="transparent")
         titles.grid(row=0, column=tcol, sticky="w")
-        ctk.CTkLabel(titles, text=APP_TITLE, font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w")
+        ctk.CTkLabel(titles, text=APP_TITLE, font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w")
         ctk.CTkLabel(
             titles, text="Turn a YouTube song into an MP3 for the Yoto player.",
-            text_color=MUTED, font=ctk.CTkFont(size=13)).pack(anchor="w")
+            text_color=MUTED, font=ctk.CTkFont(size=12)).pack(anchor="w")
         ctk.CTkLabel(
             titles, text="Built by Matt for my favourite niece ♥",
-            text_color=PINK, font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w", pady=(2, 0))
+            text_color=PINK, font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w")
         right = ctk.CTkFrame(header, fg_color="transparent")
         right.grid(row=0, column=ncol, sticky="e", padx=(8, 0))
         self.several_btn = ctk.CTkButton(
-            right, text="≡  Download multiple", width=152, fg_color=SECONDARY,
+            right, text="≡  Download multiple", width=150, height=30, fg_color=SECONDARY,
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_several)
         self.several_btn.pack(fill="x")
         self.new_btn = ctk.CTkButton(
-            right, text="↺  New video", width=152, fg_color=SECONDARY,
+            right, text="↺  New video", width=150, height=30, fg_color=SECONDARY,
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_new)
-        self.new_btn.pack(fill="x", pady=(6, 0))
+        self.new_btn.pack(fill="x", pady=(5, 0))
 
-        # --- Step 1: link ---
-        b1 = self._step(1, 1, "Paste a YouTube link")
+        # --- Step 1: link (full width) ---
+        c1, b1 = self._step(self, 1, "Paste a YouTube link")
+        c1.grid(row=1, column=0, sticky="ew", padx=PADX, pady=4)
         row1 = ctk.CTkFrame(b1, fg_color="transparent")
         row1.grid(row=0, column=0, sticky="ew")
         row1.grid_columnconfigure(0, weight=1)
         self.url_var = tk.StringVar()
         self.url_entry = ctk.CTkEntry(
-            row1, textvariable=self.url_var, height=42,
+            row1, textvariable=self.url_var, height=40,
             placeholder_text="https://www.youtube.com/watch?v=…")
         self.url_entry.grid(row=0, column=0, sticky="ew")
         self.url_entry.bind("<Return>", lambda _e: self._on_fetch())
-        # Paste lives INSIDE the box (subtle), so it doesn't compete with the
-        # real "proceed" action, which is Get info.
+        # Paste lives INSIDE the box (subtle), so it doesn't compete with Get info.
         self.paste_btn = ctk.CTkButton(
-            row1, text="Paste", width=60, height=28, fg_color=SECONDARY,
+            row1, text="Paste", width=58, height=26, fg_color=SECONDARY,
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_paste)
         self.paste_btn.place(in_=self.url_entry, relx=1.0, rely=0.5, x=-6, anchor="e")
         self.fetch_btn = ctk.CTkButton(
-            row1, text="Get info  →", width=120, height=42,
+            row1, text="Get info  →", width=118, height=40,
             font=ctk.CTkFont(size=14, weight="bold"),
             fg_color=PINK, hover_color=PINK_HOVER, command=self._on_fetch)
         self.fetch_btn.grid(row=0, column=1, padx=(10, 0))
         self.url_var.trace_add("write", lambda *_: self._refresh_fetch_btn())
         ctk.CTkLabel(
             b1, text="Paste your link, then click “Get info” to load the song.",
-            text_color=MUTED, font=ctk.CTkFont(size=12)).grid(row=1, column=0, sticky="w", pady=(6, 0))
+            text_color=MUTED, font=ctk.CTkFont(size=12)).grid(row=1, column=0, sticky="w", pady=(5, 0))
 
-        # --- Step 2: title ---
-        b2 = self._step(2, 2, "Check the song title")
+        # --- Steps 2 & 3 side-by-side (uses the width instead of stacking tall) ---
+        cols = ctk.CTkFrame(self, fg_color="transparent")
+        cols.grid(row=2, column=0, sticky="ew", padx=PADX)
+        cols.grid_columnconfigure((0, 1), weight=1, uniform="step")
+
+        c2, b2 = self._step(cols, 2, "Check the song title")
+        c2.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=4)
         row2 = ctk.CTkFrame(b2, fg_color="transparent")
         row2.grid(row=0, column=0, sticky="ew")
         row2.grid_columnconfigure(0, weight=1)
@@ -250,39 +258,39 @@ class App(ctk.CTk):
         self.title_entry = ctk.CTkEntry(row2, textvariable=self.title_var, placeholder_text="(loads after step 1)")
         self.title_entry.grid(row=0, column=0, sticky="ew")
         self.length_var = tk.StringVar(value="Length: -")
-        ctk.CTkLabel(row2, textvariable=self.length_var, width=110, text_color=MUTED).grid(row=0, column=1, padx=(10, 0))
+        ctk.CTkLabel(row2, textvariable=self.length_var, width=88, text_color=MUTED).grid(row=0, column=1, padx=(8, 0))
         ctk.CTkLabel(
-            b2, text="This name shows under the track in the Yoto app. Edit it if you like.",
-            text_color=MUTED, font=ctk.CTkFont(size=12)).grid(row=1, column=0, sticky="w", pady=(6, 0))
+            b2, text="This is the name shown under the track in the Yoto app. Edit it if you like.",
+            text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=320, justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
 
-        # --- Step 3: trim ---
-        b3 = self._step(3, 3, "Trim the song  (optional)")
+        c3, b3 = self._step(cols, 3, "Trim  (optional)")
+        c3.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=4)
         times = ctk.CTkFrame(b3, fg_color="transparent")
         times.grid(row=0, column=0, sticky="ew")
-        ctk.CTkLabel(times, text="Start").grid(row=0, column=0, padx=(0, 6))
+        ctk.CTkLabel(times, text="Start").grid(row=0, column=0, padx=(0, 4))
         self.start_var = tk.StringVar(value="0:00")
-        self.start_entry = ctk.CTkEntry(times, textvariable=self.start_var, width=80)
+        self.start_entry = ctk.CTkEntry(times, textvariable=self.start_var, width=66)
         self.start_entry.grid(row=0, column=1)
-        ctk.CTkLabel(times, text="End").grid(row=0, column=2, padx=(18, 6))
+        ctk.CTkLabel(times, text="End").grid(row=0, column=2, padx=(12, 4))
         self.end_var = tk.StringVar()
-        self.end_entry = ctk.CTkEntry(times, textvariable=self.end_var, width=80, placeholder_text="end")
+        self.end_entry = ctk.CTkEntry(times, textvariable=self.end_var, width=66, placeholder_text="end")
         self.end_entry.grid(row=0, column=3)
-        ctk.CTkLabel(times, text="(mm:ss)", text_color=MUTED).grid(row=0, column=4, padx=(8, 0))
-
+        ctk.CTkLabel(times, text="(mm:ss)", text_color=MUTED).grid(row=0, column=4, padx=(6, 0))
         ctk.CTkLabel(b3, text="or", text_color=MUTED, font=ctk.CTkFont(size=12, slant="italic")).grid(
-            row=1, column=0, sticky="w", pady=(6, 0))
+            row=1, column=0, sticky="w", pady=(4, 0))
         quick = ctk.CTkFrame(b3, fg_color="transparent")
         quick.grid(row=2, column=0, sticky="ew", pady=(2, 0))
-        ctk.CTkLabel(quick, text="Skip first").grid(row=0, column=0, padx=(0, 6))
+        ctk.CTkLabel(quick, text="Skip first").grid(row=0, column=0, padx=(0, 4))
         self.skipfirst_var = tk.StringVar(value="0")
-        self.skipfirst_entry = ctk.CTkEntry(quick, textvariable=self.skipfirst_var, width=52)
+        self.skipfirst_entry = ctk.CTkEntry(quick, textvariable=self.skipfirst_var, width=46)
         self.skipfirst_entry.grid(row=0, column=1)
-        ctk.CTkLabel(quick, text="sec").grid(row=0, column=2, padx=(4, 0))
-        ctk.CTkLabel(quick, text="Skip last").grid(row=0, column=3, padx=(18, 6))
+        ctk.CTkLabel(quick, text="sec").grid(row=0, column=2, padx=(3, 0))
+        ctk.CTkLabel(quick, text="Skip last").grid(row=0, column=3, padx=(12, 4))
         self.skiplast_var = tk.StringVar(value="0")
-        self.skiplast_entry = ctk.CTkEntry(quick, textvariable=self.skiplast_var, width=52)
+        self.skiplast_entry = ctk.CTkEntry(quick, textvariable=self.skiplast_var, width=46)
         self.skiplast_entry.grid(row=0, column=4)
-        ctk.CTkLabel(quick, text="sec").grid(row=0, column=5, padx=(4, 0))
+        ctk.CTkLabel(quick, text="sec").grid(row=0, column=5, padx=(3, 0))
         # Start/End and Skip first/last are two views of the SAME trim: editing
         # one updates the other live. self._syncing breaks the feedback loop.
         self.skipfirst_var.trace_add("write", lambda *_: self._skip_first())
@@ -290,26 +298,26 @@ class App(ctk.CTk):
         self.start_var.trace_add("write", lambda *_: self._start_changed())
         self.end_var.trace_add("write", lambda *_: self._end_changed())
         ctk.CTkLabel(
-            b3, text="Two ways to set the same trim: the Start/End times OR the Skip first/last "
-                     "seconds. Change either and the other updates to match.",
-            text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=560, justify="left",
-        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
+            b3, text="Two ways to set the same trim: Start/End times, or Skip first/last "
+                     "seconds. Change either and the other matches.",
+            text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=320, justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
 
         # --- Download (primary action) ---
         self.download_btn = ctk.CTkButton(
-            self, text="Download MP3", height=48,
-            font=ctk.CTkFont(size=16, weight="bold"),
+            self, text="Download MP3", height=44,
+            font=ctk.CTkFont(size=15, weight="bold"),
             fg_color=PINK, hover_color=PINK_HOVER, command=self._on_download)
-        self.download_btn.grid(row=4, column=0, sticky="ew", padx=18, pady=(12, 6))
+        self.download_btn.grid(row=3, column=0, sticky="ew", padx=PADX, pady=(8, 4))
 
         # --- Footer: progress + status ---
         self.progress = ctk.CTkProgressBar(self, progress_color=PINK)
-        self.progress.grid(row=5, column=0, sticky="ew", padx=18, pady=(4, 2))
+        self.progress.grid(row=4, column=0, sticky="ew", padx=PADX, pady=(4, 2))
         self.progress.set(0)
         self.status_var = tk.StringVar(value="Starting up…")
         ctk.CTkLabel(
             self, textvariable=self.status_var, anchor="w", justify="left",
-            wraplength=600, text_color=MUTED).grid(row=6, column=0, sticky="ew", padx=18, pady=(0, 14))
+            wraplength=760, text_color=MUTED).grid(row=5, column=0, sticky="ew", padx=PADX, pady=(0, 10))
 
         self._step3_widgets = [
             self.start_entry, self.end_entry, self.skipfirst_entry, self.skiplast_entry,
@@ -473,11 +481,11 @@ class App(ctk.CTk):
         if self._bulk is not None:
             self._bulk.destroy()
             self._bulk = None
-        self.minsize(640, 735)
+        self.minsize(730, 525)
         try:
-            self.geometry(self._saved_geometry or "660x735")
+            self.geometry(self._saved_geometry or "760x550")
         except Exception:
-            self.geometry("660x735")
+            self.geometry("760x550")
 
     def _sync_set(self, var, value) -> None:
         """Set one trim var without retriggering the opposite mirror handler."""
