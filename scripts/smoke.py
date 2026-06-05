@@ -34,7 +34,12 @@ def main() -> None:
         )
         print()
         print(f"Audio: {audio.name}  Thumb: {thumb.name if thumb else None}")
-        make_mp3(audio, out, title=info.title, start=2, end=10, cover=thumb)
+        make_mp3(
+            audio, out, title=info.title, start=2, end=10, cover=thumb,
+            total_seconds=8,
+            on_progress=lambda f: print(f"\rConverting… {f * 100:5.1f}%", end=""),
+        )
+        print()
 
     print(f"Wrote {out} ({out.stat().st_size:,} bytes)")
 

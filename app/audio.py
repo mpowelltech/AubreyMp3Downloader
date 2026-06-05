@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .downloader import DownloadError
 from .paths import ffmpeg_binary
@@ -24,24 +24,29 @@ def make_mp3(
     start: float = 0.0,
     end: Optional[float] = None,
     cover: Optional[Path] = None,
+    total_seconds: Optional[float] = None,
+    on_progress: Optional[Callable[[float], None]] = None,
 ) -> None:
     """Trim to ``[start, end]``, encode MP3 (~190kbps VBR), tag + embed cover.
 
-    Falls back to no-cover if embedding the thumbnail fails, then raises a
-    user-facing error if even that fails.
+    When ``total_seconds`` and ``on_progress`` are given, reports conversion
+    progress (0..1) parsed from ffmpeg. Falls back to no-cover if embedding the
+    thumbnail fails, then raises a user-facing error if even that fails.
     """
-    rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, cover))
+    rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, cover), on_progress, total_seconds)
     if rc == 0:
         return
     if cover is not None:
-        rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, None))
+        rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, None), on_progress, total_seconds)
         if rc == 0:
             return
     raise DownloadError("Couldn't convert the audio to MP3. " + (_hint(err) or "Please try again."))
 
 
 def _build_cmd(audio_in, out_path, title, start, end, cover) -> list[str]:
-    cmd = [ffmpeg_binary(), "-y", "-hide_banner", "-loglevel", "error"]
+    # -progress pipe:1 streams machine-readable progress to stdout so we can
+    # show a real percentage bar during the (re-encode) conversion.
+    cmd = [ffmpeg_binary(), "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1"]
     if start and start > 0:
         cmd += ["-ss", f"{start:.3f}"]          # fast input seek
     cmd += ["-i", str(audio_in)]
@@ -62,14 +67,35 @@ def _build_cmd(audio_in, out_path, title, start, end, cover) -> list[str]:
     return cmd
 
 
-def _run(cmd) -> tuple[int, str]:
+# ffmpeg -progress key/value lines we don't want surfaced as error context.
+_PROGRESS_KEYS = ("frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_time",
+                  "dup_frames=", "drop_frames=", "speed=", "progress=")
+
+
+def _run(cmd, on_progress=None, total_seconds=None) -> tuple[int, str]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, **_no_window())
-        return proc.returncode, proc.stderr or ""
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **_no_window())
     except FileNotFoundError:
         return 1, "ffmpeg not found"
     except Exception as e:  # pragma: no cover - defensive
         return 1, str(e)
+
+    tail: list[str] = []
+    if proc.stdout is not None:
+        for raw in iter(proc.stdout.readline, ""):
+            line = raw.strip()
+            if line.startswith("out_time_us=") and on_progress and total_seconds:
+                try:
+                    frac = (int(line.split("=", 1)[1]) / 1_000_000) / total_seconds
+                    on_progress(max(0.0, min(1.0, frac)))
+                except ValueError:
+                    pass  # e.g. "out_time_us=N/A" early on
+            elif line and not line.startswith(_PROGRESS_KEYS):
+                tail.append(line)
+                del tail[:-15]
+    proc.wait()
+    return proc.returncode, "\n".join(tail)
 
 
 def _hint(err: str) -> str:
@@ -77,5 +103,5 @@ def _hint(err: str) -> str:
     if "no space left" in s:
         return "Your disk is full."
     if "permission denied" in s:
-        return "Couldn't write there — try a different folder."
+        return "Couldn't write there. Try a different folder."
     return ""

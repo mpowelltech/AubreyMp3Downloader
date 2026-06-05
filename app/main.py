@@ -47,6 +47,8 @@ SECONDARY   = ("gray82", "gray30")
 SECONDARY_H = ("gray73", "gray40")
 MUTED       = ("gray40", "gray65")
 TITLE_ON    = ("gray10", "gray95")
+DISABLED_BG = ("gray82", "gray32")   # greyed-out action buttons (not pink)
+DISABLED_TX = ("gray55", "gray58")
 
 # Badge appearance for each step depending on the current state.
 _BADGES = {
@@ -164,12 +166,21 @@ class App(ctk.CTk):
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
 
-        # --- Header (title + New video) ---
+        # --- Header (logo + title + New video) ---
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 2))
-        header.grid_columnconfigure(0, weight=1)
+        tcol, ncol = 0, 1
+        try:  # logo next to the title (skipped gracefully if Pillow is missing)
+            from PIL import Image
+            self._logo = ctk.CTkImage(
+                light_image=Image.open(resource_path("assets/icon_header.png")), size=(56, 56))
+            ctk.CTkLabel(header, text="", image=self._logo).grid(row=0, column=0, padx=(0, 12))
+            tcol, ncol = 1, 2
+        except Exception:
+            pass
+        header.grid_columnconfigure(tcol, weight=1)
         titles = ctk.CTkFrame(header, fg_color="transparent")
-        titles.grid(row=0, column=0, sticky="w")
+        titles.grid(row=0, column=tcol, sticky="w")
         ctk.CTkLabel(titles, text=APP_TITLE, font=ctk.CTkFont(size=22, weight="bold")).pack(anchor="w")
         ctk.CTkLabel(
             titles, text="Turn a YouTube song into an MP3 for the Yoto player.",
@@ -177,7 +188,7 @@ class App(ctk.CTk):
         self.new_btn = ctk.CTkButton(
             header, text="↺  New video", width=110, fg_color=SECONDARY,
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_new)
-        self.new_btn.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.new_btn.grid(row=0, column=ncol, sticky="e", padx=(8, 0))
 
         # --- Step 1: link ---
         b1 = self._step(1, 1, "Paste a YouTube link")
@@ -214,10 +225,10 @@ class App(ctk.CTk):
         self.title_var = tk.StringVar()
         self.title_entry = ctk.CTkEntry(row2, textvariable=self.title_var, placeholder_text="(loads after step 1)")
         self.title_entry.grid(row=0, column=0, sticky="ew")
-        self.length_var = tk.StringVar(value="Length: —")
+        self.length_var = tk.StringVar(value="Length: -")
         ctk.CTkLabel(row2, textvariable=self.length_var, width=110, text_color=MUTED).grid(row=0, column=1, padx=(10, 0))
         ctk.CTkLabel(
-            b2, text="This name shows under the track in the Yoto app — edit it if you like.",
+            b2, text="This name shows under the track in the Yoto app. Edit it if you like.",
             text_color=MUTED, font=ctk.CTkFont(size=12)).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         # --- Step 3: trim ---
@@ -240,25 +251,23 @@ class App(ctk.CTk):
         self.skipfirst_var = tk.StringVar(value="0")
         self.skipfirst_entry = ctk.CTkEntry(quick, textvariable=self.skipfirst_var, width=52)
         self.skipfirst_entry.grid(row=0, column=1)
-        self.skipfirst_btn = ctk.CTkButton(
-            quick, text="sec ✓", width=58, fg_color=SECONDARY, hover_color=SECONDARY_H,
-            text_color=TITLE_ON, command=self._skip_first)
-        self.skipfirst_btn.grid(row=0, column=2, padx=(4, 0))
+        ctk.CTkLabel(quick, text="sec").grid(row=0, column=2, padx=(4, 0))
         ctk.CTkLabel(quick, text="Skip last").grid(row=0, column=3, padx=(18, 6))
         self.skiplast_var = tk.StringVar(value="0")
         self.skiplast_entry = ctk.CTkEntry(quick, textvariable=self.skiplast_var, width=52)
         self.skiplast_entry.grid(row=0, column=4)
-        self.skiplast_btn = ctk.CTkButton(
-            quick, text="sec ✓", width=58, fg_color=SECONDARY, hover_color=SECONDARY_H,
-            text_color=TITLE_ON, command=self._skip_last)
-        self.skiplast_btn.grid(row=0, column=5, padx=(4, 0))
+        ctk.CTkLabel(quick, text="sec").grid(row=0, column=5, padx=(4, 0))
+        # Auto-apply to Start/End when you press Enter or move away — no confirm button.
+        for ent, fn in ((self.skipfirst_entry, self._skip_first), (self.skiplast_entry, self._skip_last)):
+            ent.bind("<Return>", lambda _e, f=fn: f())
+            ent.bind("<FocusOut>", lambda _e, f=fn: f())
         ctk.CTkLabel(
-            b3, text="Leave as-is to keep the whole song. Use Skip first/last to cut an intro or outro.",
+            b3, text="Optional. Set Start/End, or type seconds in Skip first/last and press Enter.",
             text_color=MUTED, font=ctk.CTkFont(size=12)).grid(row=2, column=0, sticky="w", pady=(8, 0))
 
         # --- Download (primary action) ---
         self.download_btn = ctk.CTkButton(
-            self, text="⬇   Download MP3", height=48,
+            self, text="Download MP3", height=48,
             font=ctk.CTkFont(size=16, weight="bold"),
             fg_color=PINK, hover_color=PINK_HOVER, command=self._on_download)
         self.download_btn.grid(row=4, column=0, sticky="ew", padx=18, pady=(12, 6))
@@ -268,12 +277,12 @@ class App(ctk.CTk):
         self.progress.grid(row=5, column=0, sticky="ew", padx=18, pady=(4, 2))
         self.progress.set(0)
         self.status_var = tk.StringVar(value="Starting up…")
-        ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", text_color=MUTED).grid(
-            row=6, column=0, sticky="ew", padx=18, pady=(0, 14))
+        ctk.CTkLabel(
+            self, textvariable=self.status_var, anchor="w", justify="left",
+            wraplength=600, text_color=MUTED).grid(row=6, column=0, sticky="ew", padx=18, pady=(0, 14))
 
         self._step3_widgets = [
-            self.start_entry, self.end_entry, self.skipfirst_entry,
-            self.skiplast_entry, self.skipfirst_btn, self.skiplast_btn,
+            self.start_entry, self.end_entry, self.skipfirst_entry, self.skiplast_entry,
         ]
 
     # ---- window icon + progress bar (main thread only) ------------------- #
@@ -313,6 +322,14 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
+    def _set_action(self, btn, on: bool) -> None:
+        """Pink + readable when enabled; plain grey (not pink) when disabled."""
+        if on:
+            btn.configure(state="normal", fg_color=PINK, hover_color=PINK_HOVER, text_color="white")
+        else:
+            btn.configure(state="disabled", fg_color=DISABLED_BG, hover_color=DISABLED_BG,
+                          text_color=DISABLED_TX)
+
     def _set_badge(self, n: int, kind: str) -> None:
         badge, title = self._badges[n], self._titles[n]
         if kind == "active":
@@ -333,7 +350,7 @@ class App(ctk.CTk):
         self._enable([self.url_entry, self.paste_btn], editing_link)
         self._enable([self.title_entry], loaded)
         self._enable(self._step3_widgets, loaded)
-        self.download_btn.configure(state="normal" if loaded else "disabled")
+        self._set_action(self.download_btn, loaded)
         self.new_btn.configure(state="normal" if loaded else "disabled")
 
         for n, kind in _BADGES[state].items():
@@ -342,10 +359,7 @@ class App(ctk.CTk):
 
     def _refresh_fetch_btn(self) -> None:
         ok = self.flow_state == "empty" and self.ready and bool(self.url_var.get().strip())
-        try:
-            self.fetch_btn.configure(state="normal" if ok else "disabled")
-        except Exception:
-            pass
+        self._set_action(self.fetch_btn, ok)
 
     # ---- background: resolve yt-dlp + deno ------------------------------- #
 
@@ -357,7 +371,7 @@ class App(ctk.CTk):
             deno = ensure_deno(status=lambda m: self.q.put(("status", m)))
             self.q.put(("deno", deno))
             self.q.put(("ready", None))
-            self.q.put(("status", "Ready — paste a YouTube link above."))
+            self.q.put(("status", "Ready. Paste a YouTube link above."))
         except Exception as e:
             self.q.put(("error", f"Couldn't finish setting up.\n\n{e}\n\n"
                                  "Please check your internet connection and reopen the app."))
@@ -376,31 +390,31 @@ class App(ctk.CTk):
         self.loaded_url = None
         self.url_var.set("")
         self.title_var.set("")
-        self.length_var.set("Length: —")
+        self.length_var.set("Length: -")
         self.start_var.set("0:00")
         self.end_var.set("")
         self.skipfirst_var.set("0")
         self.skiplast_var.set("0")
         self._bar_set(0)
         self._set_state("empty")
-        self._status("Ready — paste a YouTube link above.")
+        self._status("Ready. Paste a YouTube link above.")
         self.url_entry.focus_set()
 
     def _skip_first(self) -> None:
+        if self.flow_state not in ("loaded", "done"):
+            return
         try:
             n = float(self.skipfirst_var.get() or 0)
         except ValueError:
-            messagebox.showwarning(APP_TITLE, "Enter a number of seconds to skip.")
-            return
-        self.start_var.set(fmt_time(n))
+            return  # silently ignore — this fires automatically on Tab-out
+        self.start_var.set(fmt_time(max(0, n)))
 
     def _skip_last(self) -> None:
-        if not self.info:
+        if self.flow_state not in ("loaded", "done") or not self.info:
             return
         try:
             n = float(self.skiplast_var.get() or 0)
         except ValueError:
-            messagebox.showwarning(APP_TITLE, "Enter a number of seconds to skip.")
             return
         self.end_var.set(fmt_time(max(0, self.info.duration - n)))
 
@@ -462,8 +476,14 @@ class App(ctk.CTk):
                     self.ytdlp, url, tmpdir, deno=self.deno,
                     on_progress=lambda p: self.q.put(("progress", p / 100.0)))
                 self.q.put(("status", "Converting to MP3…"))
-                self.q.put(("busy_bar", None))
-                make_mp3(audio, dest, title=title, start=start, end=end, cover=thumb)
+                self.q.put(("progress", 0.0))  # restart the bar for the convert phase
+                clip_total = None
+                if self.info is not None:
+                    base_end = end if end is not None else self.info.duration
+                    clip_total = max(0.1, base_end - start)
+                make_mp3(audio, dest, title=title, start=start, end=end, cover=thumb,
+                         total_seconds=clip_total,
+                         on_progress=lambda f: self.q.put(("progress", f)))
             self.q.put(("done", dest))
         except DownloadError as e:
             self.q.put(("error", str(e)))
@@ -518,7 +538,7 @@ class App(ctk.CTk):
     def _on_done(self, path: Path) -> None:
         self._bar_set(1.0)
         self._set_state("done")
-        self._status(f"✓ Done! Saved {path.name}  —  click “New video” for another.")
+        self._status(f"✓ Done! Saved {path.name}. Click “New video” for another.")
         if messagebox.askyesno(APP_TITLE, f"Saved:\n{path.name}\n\nOpen the folder?"):
             open_folder(path.parent)
 

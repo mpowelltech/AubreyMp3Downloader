@@ -148,7 +148,7 @@ def _friendly(stderr: str) -> str:
         return "That video is age-restricted and can't be downloaded here."
     if any(t in s for t in ("challenge", "js runtime", "javascript runtime",
                             "no solutions", "ejs", "[jsc]")):
-        return ("Couldn't process this video — the YouTube helper isn't ready yet.\n"
+        return ("Couldn't process this video. The YouTube helper isn't ready yet.\n"
                 "Check your internet connection and reopen the app so it can finish setting up.")
     if "video unavailable" in s or "this video is not available" in s:
         return "That video is unavailable (it may be removed or region-locked)."
