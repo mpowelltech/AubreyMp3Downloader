@@ -133,6 +133,7 @@ class App(ctk.CTk):
 
         self._build_ui()
         self._set_state("starting")
+        self._bar_indeterminate()  # animate while the engine sets up on first run
         self.after(100, self._poll)
         threading.Thread(target=self._init_engine, daemon=True).start()
 
@@ -491,6 +492,7 @@ class App(ctk.CTk):
                 elif kind == "ready":
                     self.ready = True
                     if self.flow_state == "starting":
+                        self._bar_set(0)
                         self._set_state("empty")
                 elif kind == "done":
                     self._on_done(Path(str(payload)))
