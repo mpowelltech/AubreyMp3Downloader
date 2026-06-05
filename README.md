@@ -1,9 +1,11 @@
 # Aubrey's YT-MP3 Downloader
 
-A small, friendly Windows app that turns YouTube songs into MP3s for importing
-into the [Yoto](https://yotoplay.com) player. Paste a link, trim it if you want,
-edit the title, and save. No installing, no command line. It can do one song at
-a time or a whole batch at once.
+A small, friendly Windows app that turns songs from the web into MP3s for
+importing into the [Yoto](https://yotoplay.com) player. Paste a link **or search
+by name**, trim it if you want (you can even **listen to your trim** before
+saving), edit the title, and save. No installing, no command line. It does one
+song at a time, a whole batch, or a **whole playlist** at once. Works with
+YouTube and many other sites (Vimeo, SoundCloud, …).
 
 > Built by Matt for my favourite niece.
 
@@ -19,23 +21,32 @@ a time or a whole batch at once.
      background, so give it a few seconds and make sure you're online.
 
 ### One song
-1. **Paste** a YouTube link into the box.
-2. Click **Get info**. The title and length fill in.
+1. **Find it** one of two ways, using the toggle at the top of step 1:
+   * **Paste a link** — paste a YouTube (or Vimeo/SoundCloud/…) link and click
+     **Get info**.
+   * **Search by name** — type a song name (e.g. *Twinkle Twinkle Little Star*),
+     click **Search**, and pick from the list. No link needed.
+2. The title and length fill in, and a little picture of the song appears.
 3. (Optional) Trim it. Set a **Start** / **End** time, or type seconds into
    **Skip first** / **Skip last**. The two ways stay in sync, so use whichever is
-   easier.
+   easier. Click **▶ Hear start** / **▶ Hear end** to listen to those few seconds
+   first, so you know the cut is right *(experimental)*.
 4. (Optional) Edit the **Title**. This is what shows under the track in Yoto.
 5. Click **Download MP3** and choose where to save it.
-6. To do another, click **New video**.
+6. To do another, click **Start over**.
 
 ### Several songs at once
-1. Click **Download multiple**.
-2. Paste or type a link and click **+ Add** (you can paste several at once).
-   Repeat for each song. Use the **✕** to remove any.
+1. Click **Download several**.
+2. Paste or type a link and click **+ Add** (you can paste several at once), or
+   paste a **playlist link** to add every song in it. Repeat for each. Use the
+   **✕** to remove any.
 3. Click **Get info for all**. Each row loads its title and length; any that
    can't load are marked and simply skipped.
 4. Edit titles and trims per row if you like.
 5. Click **Download all** and pick **one folder**. Every song saves there.
+
+> Non-YouTube sites and the trim preview are marked *experimental* — they work
+> in our testing but aren't guaranteed for every link.
 
 ### Putting them on Yoto
 Upload the MP3s to a Make Your Own card at

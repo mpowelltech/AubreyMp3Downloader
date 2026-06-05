@@ -98,6 +98,25 @@ def _run(cmd, on_progress=None, total_seconds=None) -> tuple[int, str]:
     return proc.returncode, "\n".join(tail)
 
 
+def extract_preview(audio_in: Path, out_wav: Path, start: float, dur: float = 6.0) -> bool:
+    """Cut a short WAV snippet for the trim preview. Best-effort: returns False on any error.
+
+    PCM WAV at 44.1 kHz so Windows' ``winsound`` can play it directly.
+    """
+    cmd = [
+        ffmpeg_binary(), "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{max(0.0, start):.3f}", "-i", str(audio_in),
+        "-t", f"{max(0.5, dur):.3f}",
+        "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(out_wav),
+    ]
+    try:
+        rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            timeout=60, **_no_window()).returncode
+    except Exception:
+        return False
+    return rc == 0 and out_wav.exists() and out_wav.stat().st_size > 1024
+
+
 def _hint(err: str) -> str:
     s = (err or "").lower()
     if "no space left" in s:

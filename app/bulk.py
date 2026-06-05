@@ -21,10 +21,11 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from .audio import make_mp3
-from .downloader import DownloadError, download_audio, fetch_info
+from .downloader import (DownloadError, download_audio, fetch_info, fetch_playlist,
+                         has_playlist, has_single_video, looks_like_url)
 from .main import (APP_TITLE, CARD_BG, DISABLED_BG, DISABLED_TX, DONE, MUTED,
                    PINK, PINK_HOVER, SECONDARY, SECONDARY_H, TITLE_ON, WINDOW_BG,
-                   fmt_time, open_folder, parse_time, safe_filename)
+                   clean_url, fmt_time, open_folder, parse_time, safe_filename)
 
 ERR = ("#C0392B", "#E57373")
 DEL_HOVER = ("#E8A6A6", "#7E3A3A")
@@ -61,10 +62,11 @@ def _unique(path: Path) -> Path:
 class BulkRow:
     """One song: its URL, fetched info, per-song trim/title, and its widgets."""
 
-    def __init__(self, master, url: str, on_delete) -> None:
+    def __init__(self, master, url: str, on_delete, hint_title: str = "") -> None:
         self.url = url
         self.on_delete = on_delete
         self.title = ""
+        self.hint_title = hint_title  # shown before Get info (e.g. from a playlist)
         self.duration = 0.0
         self.status = "queued"
         self.error = ""
@@ -126,7 +128,7 @@ class BulkRow:
         self.del_btn.configure(state="disabled" if self.disabled else "normal")
 
         if self.status == "queued":
-            txt, col = _short(self.url), MUTED
+            txt, col = _short(self.hint_title or self.url), MUTED
         elif self.status == "loading":
             txt, col = "Reading…   " + _short(self.url), MUTED
         elif self.status == "ok":
@@ -185,22 +187,23 @@ class BulkView(ctk.CTkFrame):
         add = ctk.CTkFrame(self, corner_radius=12, fg_color=CARD_BG)
         add.grid(row=1, column=0, sticky="ew", padx=18, pady=8)
         add.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(add, text="Add YouTube links", font=ctk.CTkFont(size=14, weight="bold")
+        ctk.CTkLabel(add, text="Add links", font=ctk.CTkFont(size=14, weight="bold")
                      ).grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(10, 0))
         rowin = ctk.CTkFrame(add, fg_color="transparent")
         rowin.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 4))
         rowin.grid_columnconfigure(0, weight=1)
         self.url_var = tk.StringVar()
         self.url_entry = ctk.CTkEntry(rowin, textvariable=self.url_var, height=40,
-                                      placeholder_text="https://www.youtube.com/watch?v=…")
+                                      placeholder_text="Paste a song link — or a whole playlist link")
         self.url_entry.grid(row=0, column=0, sticky="ew")
         self.url_entry.bind("<Return>", lambda _e: self._on_add())
         self.add_btn = ctk.CTkButton(rowin, text="+  Add", width=90, height=40,
                                      font=ctk.CTkFont(size=14, weight="bold"),
                                      fg_color=PINK, hover_color=PINK_HOVER, command=self._on_add)
         self.add_btn.grid(row=0, column=1, padx=(8, 0))
-        ctk.CTkLabel(add, text="Paste or type a link and click Add (you can paste several at once). Repeat for each song.",
-                     text_color=MUTED, font=ctk.CTkFont(size=12)
+        ctk.CTkLabel(add, text="Paste a link and click Add (you can paste several at once). Paste a "
+                              "playlist link to add every song. Non-YouTube sites are experimental.",
+                     text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=720, justify="left"
                      ).grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 12))
 
         # the list
@@ -246,7 +249,10 @@ class BulkView(ctk.CTkFrame):
             self.progress.stop()
             self.progress.configure(mode="determinate")
             self._indet = False
-        self.progress.set(value)
+        try:
+            self.progress.set(max(0.0, min(1.0, float(value))))
+        except (TypeError, ValueError):
+            self.progress.set(0)
 
     def _set_action(self, btn, on: bool) -> None:
         if on:
@@ -262,17 +268,60 @@ class BulkView(ctk.CTkFrame):
         if not text:
             return
         parts = [p for p in re.split(r"\s+", text) if p]
+        # A single playlist link (not a specific video) -> expand into many rows.
+        if len(parts) == 1 and has_playlist(parts[0]) and not has_single_video(parts[0]):
+            self.url_var.set("")
+            self._expand_playlist(parts[0])
+            return
         added = 0
         for p in parts:
-            if "http" in p.lower() or "youtu" in p.lower():
-                self.rows.append(BulkRow(self.list_frame, p, self._delete_row))
+            if looks_like_url(p):
+                self.rows.append(BulkRow(self.list_frame, clean_url(p), self._delete_row))
                 added += 1
-        if added == 0:  # accept whatever they typed as a single entry
-            self.rows.append(BulkRow(self.list_frame, text, self._delete_row))
+        if added == 0:
+            # Don't add a row that could only ever fail — guide instead.
+            self.status_var.set("Please paste a web link (it should start with http). "
+                                "To search by name, use the one-song screen.")
+            return
         self.url_var.set("")
         self.url_entry.focus_set()
         self._regrid()
         self._refresh_actions()
+
+    # ---- playlist import ----
+    def import_playlist(self, url: str) -> None:
+        """Public entry point: expand ``url`` (called when opened from a playlist link)."""
+        self._expand_playlist(url)
+
+    def _expand_playlist(self, url: str) -> None:
+        if self.busy or not self.app.ready:
+            return
+        self._set_busy(True)
+        self._bar_indeterminate()
+        self.status_var.set("Reading the playlist…")
+        threading.Thread(target=self._expand_worker, args=(url,), daemon=True).start()
+
+    def _expand_worker(self, url: str) -> None:
+        try:
+            pl = fetch_playlist(self.app.ytdlp, url, self.app.deno, limit=60)
+            self.q.put(("playlist_rows", pl))
+        except DownloadError as e:
+            self.q.put(("playlist_err", str(e)))
+        except Exception as e:
+            self.q.put(("playlist_err", str(e)))
+
+    def _on_playlist_rows(self, pl) -> None:
+        self._set_busy(False)
+        self._bar_set(0)
+        for u, title in pl.entries:
+            self.rows.append(BulkRow(self.list_frame, u, self._delete_row, hint_title=title))
+        self._regrid()
+        self._refresh_actions()
+        note = f"Added {len(pl.entries)} songs from “{pl.title}”."
+        if pl.truncated:
+            note += f" (the first {len(pl.entries)} of {pl.total})"
+        self.status_var.set(note + " Loading details…")
+        self._get_info_all()  # auto-fetch metadata so the user can edit straight away
 
     def _delete_row(self, row: BulkRow) -> None:
         if self.busy:
@@ -352,16 +401,25 @@ class BulkView(ctk.CTkFrame):
         for r in self.rows:
             if r.status not in ("ok", "done"):
                 continue
+            label = r.title_var.get().strip() or r.title or "this song"
             try:
                 start = parse_time(r.start_var.get())
                 end_text = r.end_var.get().strip()
                 end = parse_time(end_text) if end_text else None
             except ValueError as e:
-                errs.append(f"“{r.title}”: {e}")
+                errs.append(f"“{label}”: {e}")
                 continue
             if end is not None and end <= start:
-                errs.append(f"“{r.title}”: end time must be after start time")
+                errs.append(f"“{label}”: end time must be after start time")
                 continue
+            # Clamp to the known length so a too-large value can't make an empty clip.
+            start = max(0.0, start)
+            if r.duration and r.duration > 0:
+                start = min(start, max(0.0, r.duration - 0.1))
+                if end is not None:
+                    end = min(end, r.duration)
+                    if end <= start:
+                        end = None
             jobs.append({"row": r, "url": r.url, "title": r.title_var.get().strip() or "audio",
                          "start": start, "end": end, "duration": r.duration})
         if errs:
@@ -391,9 +449,12 @@ class BulkView(ctk.CTkFrame):
                         on_progress=lambda p: self.q.put(("progress", p / 100.0)))
                     self.q.put(("row_status", (row, "converting")))
                     self.q.put(("status", f"Converting {i} of {n}: {job['title']}"))
-                    self.q.put(("progress", 0.0))
                     base_end = job["end"] if job["end"] is not None else job["duration"]
-                    clip_total = max(0.1, base_end - job["start"])
+                    # Unknown length -> let the bar go indeterminate instead of
+                    # pinning a misleading percentage (mirror single-song mode).
+                    clip_total = (max(0.1, base_end - job["start"])
+                                  if base_end and base_end > job["start"] else None)
+                    self.q.put(("busy_bar", None) if clip_total is None else ("progress", 0.0))
                     dest = _unique(folder / f"{safe_filename(job['title'])}.mp3")
                     make_mp3(audio, dest, title=job["title"], start=job["start"], end=job["end"],
                              cover=thumb, total_seconds=clip_total,
@@ -436,6 +497,13 @@ class BulkView(ctk.CTkFrame):
                 elif kind == "row_fail":
                     row, msg = payload  # type: ignore[misc]
                     row.set_error(msg, failed=True)
+                elif kind == "playlist_rows":
+                    self._on_playlist_rows(payload)  # type: ignore[arg-type]
+                elif kind == "playlist_err":
+                    self._set_busy(False)
+                    self._bar_set(0)
+                    self.status_var.set("Couldn't read that playlist.")
+                    messagebox.showerror(APP_TITLE, str(payload))
                 elif kind == "fetch_done":
                     self._set_busy(False)
                     self._bar_set(0)
@@ -452,7 +520,15 @@ class BulkView(ctk.CTkFrame):
                         open_folder(folder)
         except queue.Empty:
             pass
-        self.after(100, self._poll)
+        except Exception:
+            # never let one bad UI update kill the pump (it would freeze bulk mode)
+            try:
+                self.status_var.set("Something went wrong. Please try again.")
+            except Exception:
+                pass
+        finally:
+            if self._alive and self.winfo_exists():
+                self.after(100, self._poll)
 
     # ---- close / back to single ----
     def _close(self) -> None:

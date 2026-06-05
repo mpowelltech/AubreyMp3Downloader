@@ -5,9 +5,11 @@ Guidance for Claude Code (and humans) working in this repo.
 ## What this is
 
 **Aubrey's YT-MP3 Downloader** — a single-file Windows GUI app so a
-non-technical user can paste a YouTube link, trim it, and export an MP3 to
-import into a Yoto player. Everything is self-contained: the user installs
-nothing and never touches a terminal.
+non-technical user can grab a song (paste a link **or search by name**), trim
+it, and export an MP3 to import into a Yoto player. Everything is
+self-contained: the user installs nothing and never touches a terminal. As of
+v1.1.0 it also imports whole playlists, accepts non-YouTube links
+(experimental), and can play back the trim points before saving (experimental).
 
 Author works on a **Mac**; the **target is Windows**. The download→trim→MP3
 pipeline is fully testable on the Mac; only producing the `.exe` needs Windows.
@@ -20,10 +22,15 @@ app/
   paths.py             # dev-vs-frozen resource paths; ffmpeg/cache locations
   updater.py           # ensure + auto-update yt-dlp AND ensure deno (Windows
                        #   downloads yt-dlp.exe + deno.exe; dev uses PATH)
-  downloader.py        # shells out to yt-dlp: fetch_info() + download_audio()
-  audio.py             # shells out to ffmpeg: make_mp3() — trim, encode, tag, cover
-  main.py              # single-song GUI; state machine; workers -> queue -> Tk loop
-  bulk.py              # "Download multiple" in-window overlay: add a list, fetch all, download all
+  downloader.py        # shells out to yt-dlp: fetch_info(), download_audio(),
+                       #   search() (ytsearch), fetch_playlist() (flat), URL helpers
+  audio.py             # shells out to ffmpeg: make_mp3() (trim/encode/tag/cover)
+                       #   + extract_preview() (short WAV snippet for the trim preview)
+  media.py             # best-effort thumbnail fetch (certifi) for the song preview
+  player.py            # best-effort WAV playback (winsound/afplay) for the trim preview
+  main.py              # single-song GUI; state machine; workers -> queue -> Tk loop;
+                       #   search/chooser overlay; trim audio preview (cached audio)
+  bulk.py              # "Download several" in-window overlay: add a list/playlist, fetch all, download all
 scripts/smoke.py       # headless pipeline test (no GUI)
 scripts/run_mac.command # run from source on macOS (no exe build) for quick UI testing
 AubreyMp3.spec         # PyInstaller --onefile spec
@@ -65,7 +72,7 @@ touch Tk widgets from a worker thread.**
   without its tools (`_verify_ffmpeg`, `_on_setup_error`, `_start_engine`).
 - **HiDPI sizing:** customtkinter's `CTk.geometry("WxH")` takes LOGICAL pixels
   and multiplies them by the display DPI factor → physical px. So pass logical
-  sizes (760x560 single, 760x600 bulk) and it scales correctly on HiDPI. Do NOT
+  sizes (800x690 single, 800x660 bulk) and it scales correctly on HiDPI. Do NOT
   measure `winfo_reqheight()` at `__init__` and raw-set it: before the window
   maps to a monitor the DPI is unknown, so reqheight comes back LOGICAL and the
   window ends up ~1/DPI too small (this caused a regression). Keep the bulk songs
@@ -81,10 +88,52 @@ touch Tk widgets from a worker thread.**
   process to exit, swaps the exe in place, and relaunches
   (`updater.check_for_app_update` / `download_and_relaunch`).
 
+## v1.1.0 features (locked with the author)
+
+- **Search by name (step 1 toggle).** A `CTkSegmentedButton` switches step 1
+  between "Paste a link" and "Search by name". Search runs `yt-dlp -J
+  --flat-playlist "ytsearchN:<query>"` (`downloader.search`, metadata-only, fast,
+  live results dropped) and shows hits in a `ChooserView` overlay (same
+  place/tkraise pattern as bulk). Picking one routes through the normal
+  `_load_url` → `fetch_info` path, so everything downstream is unchanged. A URL
+  typed in search mode is auto-routed to the link path; non-URL text in link mode
+  nudges the user to the search tab. `looks_like_url` / `clean_url` classify input.
+- **Playlist import.** `downloader.fetch_playlist` expands a playlist/mix link via
+  `--flat-playlist --playlist-end 60` (cap so an endless "Mix" can't flood),
+  skipping `[Private/Deleted]` and live entries and only keeping real http(s)
+  URLs (`_entry_url`). In bulk, pasting a *pure* playlist link auto-expands into
+  rows then auto-runs "Get info for all"; in single mode a playlist link prompts
+  to open bulk. A `__PLAYLIST__` sentinel from `fetch_info` is the safety net if a
+  playlist slips through.
+- **Beyond YouTube (experimental).** yt-dlp already supports ~all sites; we just
+  opened up the copy/placeholders and broadened URL acceptance. `VideoInfo.source`
+  drives a "from <Site> (experimental)" label for non-YouTube. No code path is
+  YouTube-specific except the JS-challenge engine args (harmless elsewhere).
+- **Trim audio preview (experimental).** "▶ Hear start / Hear end" let the user
+  *listen* to the cut points before saving — important now that search means they
+  may never have watched the video. Design: on first preview we download the full
+  bestaudio once into a per-session temp dir (`_preview_dir`) and **cache it**;
+  `audio.extract_preview` cuts a ~6 s PCM WAV (so Windows `winsound` can play it),
+  and `player.play` plays it best-effort (winsound/afplay; any failure just shows
+  a message, never blocks). The cached audio is **reused by the final export**, so
+  the ~9 s yt-dlp download is paid **once per song** (first preview *or* first
+  download — same cost); every later preview/re-listen is a ~0.08 s local cut and
+  export-after-preview is ~0.16 s. `_preview_busy` locks the screen during the
+  one-time fetch; `_cache_url` ties cached audio to its video and is dropped on
+  Start over / new load; `destroy()` cleans the temp dir.
+- **Unbreakable hardening.** `_poll` (both screens) survives any handler
+  exception and always reschedules in `finally` — a single UI bug can never freeze
+  the app. `parse_time` rejects `inf`/`nan`. `_validate_trim` blocks Download on
+  bad/over-length trims (inline red hint) and times are clamped to the real length
+  before ffmpeg. Progress bars clamp to [0,1] and go indeterminate when the length
+  is unknown (no fake/stuck percentage). Self-update is suppressed while an overlay
+  or preview is mid-flight. `_friendly` never surfaces a raw traceback.
+
 ## Bulk mode (app/bulk.py)
 
 `BulkView` is a `CTkFrame` (NOT a Toplevel) opened from the single screen's
-"Download multiple" button. `App._on_several` enlarges the window, creates the
+"Download several" button (or automatically when a playlist link is detected).
+`App._on_several` enlarges the window, creates the
 frame, and `place(relwidth=1, relheight=1)` + `tkraise()` overlays it over the
 single screen; `App._close_bulk` destroys it and restores the geometry. This
 single-window approach avoids the flaky macOS behaviour of withdrawing the root

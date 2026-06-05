@@ -1,3 +1,3 @@
 """Aubrey's YT-MP3 Downloader application package."""
 
-__version__ = "1.0.6"
+__version__ = "1.1.0"
