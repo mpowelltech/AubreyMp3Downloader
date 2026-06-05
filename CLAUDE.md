@@ -27,10 +27,13 @@ app/
   audio.py             # shells out to ffmpeg: make_mp3() (trim/encode/tag/cover)
                        #   + extract_preview() (short WAV snippet for the trim preview)
   media.py             # best-effort thumbnail fetch (certifi) for the song preview
-  player.py            # best-effort WAV playback (winsound/afplay) for the trim preview
-  timeline.py          # TrimTimeline: draggable Canvas trim bar (handles/waveform/playhead)
-  main.py              # single-song GUI; state machine; workers -> queue -> Tk loop;
-                       #   search/chooser overlay; trim audio preview (cached audio)
+  player.py            # Player: streams ffmpeg-decoded PCM to a miniaudio device
+                       #   (play/stop/seek/position); best-effort, lazy-imported
+  timeline.py          # TrimTimeline: draggable Canvas trim bar (handles/waveform/
+                       #   playhead); on_change=trim, on_seek=set play position
+  main.py              # single-song GUI; ACCORDION of 3 expandable steps; state
+                       #   machine; workers -> queue -> Tk loop; search/chooser overlay;
+                       #   mini player (Play/Stop/seek) over the cached audio
   bulk.py              # "Download several" in-window overlay: add a list/playlist, fetch all, download all
 scripts/smoke.py       # headless pipeline test (no GUI)
 scripts/run_mac.command # run from source on macOS (no exe build) for quick UI testing
@@ -58,10 +61,11 @@ touch Tk widgets from a worker thread.**
   yt-dlp.exe bundles the EJS solver scripts; deno is the missing piece.
 - **Trim UX:** Start/End fields (mm:ss) are the precise source of truth; a
   draggable `TrimTimeline` (timeline.py) mirrors them (drag a handle -> updates
-  the text; type -> moves the handle). "Hear start/Hear end" play the real audio
-  at each cut point and the timeline shows the playing slice + a playhead. ffmpeg
-  does the actual cut (`-ss` input seek + `-t` output duration), re-encoding so
-  it's accurate. (v1.2.0 replaced the old "Skip first/last seconds" boxes.)
+  the text; type -> moves the handle). A mini player (Play/Stop) streams the whole
+  song; clicking the waveform body (not a handle) seeks; a playhead tracks the
+  real playback position. ffmpeg does the actual cut (`-ss` input seek + `-t`
+  output duration), re-encoding so it's accurate. (v1.2.0 dropped "Skip
+  first/last"; v1.3.0 replaced the snippet "Hear start/end" with the player.)
 - **Output:** user edits the title and picks the folder on every export
   (Save-As dialog). Title goes into the ID3 tag; thumbnail → cover art.
 - **Build:** GitHub Actions Windows runner (free, private-repo friendly).
@@ -76,7 +80,7 @@ touch Tk widgets from a worker thread.**
   without its tools (`_verify_ffmpeg`, `_on_setup_error`, `_start_engine`).
 - **HiDPI sizing:** customtkinter's `CTk.geometry("WxH")` takes LOGICAL pixels
   and multiplies them by the display DPI factor → physical px. So pass logical
-  sizes (800x725 single, 800x680 bulk) and it scales correctly on HiDPI. Do NOT
+  sizes (800x670 single, 800x680 bulk) and it scales correctly on HiDPI. Do NOT
   measure `winfo_reqheight()` at `__init__` and raw-set it: before the window
   maps to a monitor the DPI is unknown, so reqheight comes back LOGICAL and the
   window ends up ~1/DPI too small (this caused a regression). Keep the bulk songs
@@ -118,22 +122,28 @@ touch Tk widgets from a worker thread.**
   opened up the copy/placeholders and broadened URL acceptance. `VideoInfo.source`
   drives a "from <Site> (experimental)" label for non-YouTube. No code path is
   YouTube-specific except the JS-challenge engine args (harmless elsewhere).
-- **Trim audio preview + audio prefetch (experimental).** "Hear start / Hear end"
-  let the user *listen* to the cut points before saving (important now that search
-  means they may never have watched the video). Design: as soon as a song loads we
-  **prefetch** the full bestaudio in the background into a per-song subdir of
-  `_preview_dir` (`_ensure_audio` -> `_prefetch_worker` -> `audio_ready`) and
-  **cache it**. So previews are instant local cuts (`audio.extract_preview` -> a
-  ~6 s PCM WAV that Windows `winsound`/macOS `afplay` plays best-effort), the
-  waveform is computed from it (`audio.waveform`), and the **final export reuses
-  the cached audio** — the ~9 s yt-dlp download happens **once per song**, in the
-  background, overlapping the user's trimming. yt-dlp also caches the JS-challenge
-  solver, so the prefetch isn't a second full "captcha" solve. A preview clicked
-  before the prefetch finishes is queued (`_pending_preview`) and plays on
-  `audio_ready`. `_cache_url` ties cached audio to its video; `_clear_cache`
-  (on Start over / new load) and `destroy()` remove the temp subdirs. Each prefetch
-  gets its OWN subdir so a still-finishing previous download can't collide on the
-  `audio.<ext>` output name.
+- **Accordion (v1.3.0).** The single screen is three stacked expandable sections
+  (Find your song / Check the song / Trim & preview), only one body open at a time
+  (`_acc_section`/`_expand`/`_acc_click`). Section 1 is reachable only while
+  `empty`; 2 & 3 once a song is loaded (use Start over to go back to 1). Loading a
+  song auto-expands 2; a "Next: Trim" button opens 3. This is more compact than the
+  old side-by-side and gives the title one full-width line + a wide waveform.
+- **Mini player + audio prefetch (experimental, v1.3.0).** As soon as a song loads
+  we **prefetch** the full bestaudio in the background into a per-song subdir of
+  `_preview_dir` (`_ensure_audio` -> `_prefetch_worker` -> `audio_ready`), **cache
+  it**, compute the waveform (`audio.waveform`), and `Player.load` it. The player
+  (player.py) streams ffmpeg-decoded PCM to a miniaudio device: Play/Stop, click
+  the waveform to seek (`on_seek` -> `Player.play(t)`), and a playhead driven by
+  `Player.position()` polled in the Tk loop (`_tick_playhead`; workers never touch
+  Tk). The **export reuses the cached audio**, so the ~9 s yt-dlp download happens
+  **once per song**, in the background, overlapping trimming (yt-dlp also caches
+  the JS-challenge solver, so it isn't a second "captcha"). Player is BEST-EFFORT
+  and lazy-imported: if miniaudio/the device is unavailable the transport hides and
+  the app/download are unaffected. `_cache_url` ties cached audio to its video;
+  `_clear_cache` (Start over / new load) and `destroy()` remove the temp subdirs;
+  each prefetch gets its OWN subdir so a still-finishing previous download can't
+  collide on the `audio.<ext>` name. miniaudio is bundled via `collect_all` in the
+  spec (one cffi `.pyd`).
 - **Unbreakable hardening.** `_poll` (both screens) survives any handler
   exception and always reschedules in `finally` — a single UI bug can never freeze
   the app. `parse_time` rejects `inf`/`nan`. `_validate_trim` blocks Download on

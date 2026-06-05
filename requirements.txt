@@ -4,3 +4,4 @@
 customtkinter>=5.2.2
 pillow>=10.0.0          # in-app header logo (CTkImage)
 certifi>=2024.2.2       # CA bundle for our HTTPS downloads (Windows OpenSSL can't auto-fetch roots)
+miniaudio>=1.59        # trim-preview player backend (ffmpeg pipes PCM to it); lazy+guarded in player.py

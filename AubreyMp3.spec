@@ -21,7 +21,16 @@ except NameError:
 # customtkinter ships theme assets + needs a few hidden imports.
 ctk_datas, ctk_binaries, ctk_hidden = collect_all("customtkinter")
 
-binaries = list(ctk_binaries)
+# miniaudio is the preview player's audio backend: a single cffi extension
+# (_miniaudio) with a statically-linked C lib. collect_all pulls in the .pyd so
+# the frozen exe can import it. It's imported lazily + guarded in player.py, so
+# even if this somehow misses, the app still launches (preview just degrades).
+try:
+    ma_datas, ma_binaries, ma_hidden = collect_all("miniaudio")
+except Exception:
+    ma_datas, ma_binaries, ma_hidden = [], [], []
+
+binaries = list(ctk_binaries) + list(ma_binaries)
 _ffmpeg = os.path.join(HERE, "build", "ffmpeg.exe")
 if os.path.exists(_ffmpeg):
     binaries.append((_ffmpeg, "."))   # extracted next to the exe at runtime
@@ -30,7 +39,7 @@ _icon = os.path.join(HERE, "assets", "icon.ico")
 icon = _icon if os.path.exists(_icon) else None
 assert icon, "assets/icon.ico not found — the exe would have no icon"
 
-datas = list(ctk_datas)
+datas = list(ctk_datas) + list(ma_datas)
 _assets = os.path.join(HERE, "assets")
 if os.path.isdir(_assets):
     datas.append((_assets, "assets"))   # bundle icon.ico / icon.png for the runtime window icon
@@ -40,7 +49,7 @@ a = Analysis(
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=list(ctk_hidden),
+    hiddenimports=list(ctk_hidden) + list(ma_hidden),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

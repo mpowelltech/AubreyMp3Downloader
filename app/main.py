@@ -31,12 +31,13 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
-from . import __version__, player
-from .audio import extract_preview, make_mp3, waveform
+from . import __version__
+from .audio import make_mp3, waveform
 from .downloader import (DownloadError, VideoInfo, download_audio, fetch_info,
                          has_playlist, has_single_video, looks_like_url, search)
 from .media import fetch_image
 from .paths import ffmpeg_binary, resource_path
+from .player import Player
 from .timeline import TrimTimeline
 from .updater import (check_for_app_update, download_and_relaunch, ensure_deno,
                       ensure_ytdlp, update_in_background)
@@ -158,8 +159,8 @@ class App(ctk.CTk):
         # Logical sizes — customtkinter scales these up by the display DPI, so
         # this is correct on HiDPI (don't measure/raw-set: DPI is unknown until
         # the window maps). Overlays (search/bulk) sit on top; lists scroll.
-        self.geometry("800x725")
-        self.minsize(780, 690)
+        self.geometry("800x670")
+        self.minsize(780, 600)
         self.configure(fg_color=WINDOW_BG)
         self._apply_icon()
 
@@ -178,18 +179,21 @@ class App(ctk.CTk):
         self._chooser = None     # the search-results overlay, when open
         self._choice = None      # a custom choice dialog overlay, when open
         self._preview_img = None # keep a ref so the CTkImage isn't garbage-collected
-        # --- trim audio preview (experimental) ---
+        self._sec: dict[int, dict] = {}   # accordion sections
+        self._expanded = 1                # which section body is open
+        # --- trim audio preview (experimental, streaming player) ---
         # We download the full audio ONCE in the background as soon as a song loads,
-        # cache it, and reuse it for both previews and the final export.
+        # cache it, and reuse it for the player AND the final export.
+        self._player = Player()
         self._preview_dir = Path(tempfile.mkdtemp(prefix="aubreyprev_"))
         self._cache_url: str | None = None   # which video the cached audio belongs to
         self._cache_audio: Path | None = None
         self._cache_thumb: Path | None = None
         self._prefetch_url: str | None = None   # url whose audio is downloading now
-        self._pending_preview = None            # (which, at, seglen) to play once ready
-        self._snip_seq = 0                      # unique preview-snippet filenames
+        self._pending_play = None               # seconds to play once audio is ready
+        self._seek_pos = 0.0                    # where Play will start (set by waveform clicks)
         self._audio_seq = 0                     # unique per-song audio subdirs
-        self._play_anim = None                  # after-id of the playhead animation
+        self._play_anim = None                  # after-id of the playhead poll loop
         self._badges: dict[int, ctk.CTkLabel] = {}
         self._titles: dict[int, ctk.CTkLabel] = {}
         self.q: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -201,26 +205,28 @@ class App(ctk.CTk):
 
     # ---- UI construction ------------------------------------------------- #
 
-    def _step(self, parent, number: int, title: str) -> tuple:
-        """Create a numbered 'step' card; store its badge/title; return (card, body)."""
-        card = ctk.CTkFrame(parent, corner_radius=12, fg_color=CARD_BG,
+    def _acc_section(self, number: int, title: str) -> tuple:
+        """A collapsible accordion section: clickable header + a hideable body."""
+        card = ctk.CTkFrame(self, corner_radius=12, fg_color=CARD_BG,
                             border_width=1, border_color=CARD_BORDER)
         card.grid_columnconfigure(0, weight=1)
-
         head = ctk.CTkFrame(card, fg_color="transparent")
-        head.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 0))
-        badge = ctk.CTkLabel(
-            head, text=str(number), width=26, height=26, corner_radius=13,
-            font=ctk.CTkFont(size=13, weight="bold"))
-        badge.grid(row=0, column=0, padx=(0, 8))
-        title_lbl = ctk.CTkLabel(head, text=title, font=ctk.CTkFont(size=14, weight="bold"))
+        head.grid(row=0, column=0, sticky="ew", padx=14, pady=10)
+        head.grid_columnconfigure(1, weight=1)
+        badge = ctk.CTkLabel(head, text=str(number), width=26, height=26, corner_radius=13,
+                             font=ctk.CTkFont(size=13, weight="bold"))
+        badge.grid(row=0, column=0, padx=(0, 10))
+        title_lbl = ctk.CTkLabel(head, text=title, anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
         title_lbl.grid(row=0, column=1, sticky="w")
+        chevron = ctk.CTkLabel(head, text="", width=18, text_color=MUTED, font=ctk.CTkFont(size=14))
+        chevron.grid(row=0, column=2, padx=(8, 0))
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.grid_columnconfigure(0, weight=1)
         self._badges[number] = badge
         self._titles[number] = title_lbl
-
-        body = ctk.CTkFrame(card, fg_color="transparent")
-        body.grid(row=1, column=0, sticky="ew", padx=14, pady=(6, 12))
-        body.grid_columnconfigure(0, weight=1)
+        self._sec[number] = {"card": card, "body": body, "chevron": chevron, "avail": False}
+        for w in (head, badge, title_lbl, chevron):
+            w.bind("<Button-1>", lambda _e, n=number: self._acc_click(n))
         return card, body
 
     def _build_ui(self) -> None:
@@ -234,7 +240,7 @@ class App(ctk.CTk):
         try:  # logo next to the title (skipped gracefully if Pillow is missing)
             from PIL import Image
             self._logo = ctk.CTkImage(
-                light_image=Image.open(resource_path("assets/icon_header.png")), size=(62, 62))
+                light_image=Image.open(resource_path("assets/icon_header.png")), size=(58, 58))
             ctk.CTkLabel(header, text="", image=self._logo).grid(row=0, column=0, padx=(0, 12))
             tcol, ncol = 1, 2
         except Exception:
@@ -242,7 +248,7 @@ class App(ctk.CTk):
         header.grid_columnconfigure(tcol, weight=1)
         titles = ctk.CTkFrame(header, fg_color="transparent")
         titles.grid(row=0, column=tcol, sticky="w")
-        ctk.CTkLabel(titles, text=APP_TITLE, font=ctk.CTkFont(size=21, weight="bold")).pack(anchor="w")
+        ctk.CTkLabel(titles, text=APP_TITLE, font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w")
         ctk.CTkLabel(
             titles, text="Turn a song from the web into an MP3 for the Yoto player.",
             text_color=MUTED, font=ctk.CTkFont(size=12)).pack(anchor="w")
@@ -260,10 +266,9 @@ class App(ctk.CTk):
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_new)
         self.new_btn.pack(fill="x", pady=(5, 0))
 
-        # --- Step 1: find the song (link OR search) ---
-        c1, b1 = self._step(self, 1, "Find your song")
+        # ===== Section 1: find the song =====
+        c1, b1 = self._acc_section(1, "Find your song")
         c1.grid(row=1, column=0, sticky="ew", padx=PADX, pady=4)
-
         self.mode_var = tk.StringVar(value=MODE_LINK)
         self.mode_seg = ctk.CTkSegmentedButton(
             b1, values=[MODE_LINK, MODE_SEARCH], variable=self.mode_var,
@@ -272,7 +277,6 @@ class App(ctk.CTk):
             unselected_color=SECONDARY, unselected_hover_color=SECONDARY_H,
             text_color=TITLE_ON, font=ctk.CTkFont(size=12, weight="bold"))
         self.mode_seg.grid(row=0, column=0, sticky="w", pady=(0, 8))
-
         row1 = ctk.CTkFrame(b1, fg_color="transparent")
         row1.grid(row=1, column=0, sticky="ew")
         row1.grid_columnconfigure(0, weight=1)
@@ -282,7 +286,6 @@ class App(ctk.CTk):
             placeholder_text="https://www.youtube.com/watch?v=…")
         self.url_entry.grid(row=0, column=0, sticky="ew")
         self.url_entry.bind("<Return>", lambda _e: self._on_go())
-        # Paste lives INSIDE the box (subtle), so it doesn't compete with the action.
         self.paste_btn = ctk.CTkButton(
             row1, text="Paste", width=58, height=28, fg_color=SECONDARY,
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_paste)
@@ -293,54 +296,72 @@ class App(ctk.CTk):
             fg_color=PINK, hover_color=PINK_HOVER, command=self._on_go)
         self.go_btn.grid(row=0, column=1, padx=(10, 0))
         self.url_var.trace_add("write", lambda *_: self._refresh_go_btn())
-        self.hint1_var = tk.StringVar(
-            value="Paste a link, then click “Get info” to load the song.")
-        ctk.CTkLabel(
-            b1, textvariable=self.hint1_var, text_color=MUTED, font=ctk.CTkFont(size=12),
-            wraplength=720, justify="left").grid(row=2, column=0, sticky="w", pady=(7, 0))
+        self.hint1_var = tk.StringVar(value="Paste a link, then click “Get info” to load the song.")
+        ctk.CTkLabel(b1, textvariable=self.hint1_var, text_color=MUTED, font=ctk.CTkFont(size=12),
+                     wraplength=720, justify="left").grid(row=2, column=0, sticky="w", pady=(7, 0))
         ctk.CTkLabel(
             b1, text="Works with YouTube, plus Vimeo, SoundCloud and many more "
                      "(non-YouTube sites are experimental).",
             text_color=MUTED, font=ctk.CTkFont(size=11, slant="italic"),
             wraplength=720, justify="left").grid(row=3, column=0, sticky="w", pady=(2, 0))
 
-        # --- Steps 2 & 3 side-by-side (uses the width instead of stacking tall) ---
-        cols = ctk.CTkFrame(self, fg_color="transparent")
-        cols.grid(row=2, column=0, sticky="ew", padx=PADX)
-        cols.grid_columnconfigure((0, 1), weight=1, uniform="step")
-
-        c2, b2 = self._step(cols, 2, "Check the song")
-        c2.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=4)
+        # ===== Section 2: check the song (title on one line, next to the picture) =====
+        c2, b2 = self._acc_section(2, "Check the song")
+        c2.grid(row=2, column=0, sticky="ew", padx=PADX, pady=4)
         b2.grid_columnconfigure(1, weight=1)
-        # Thumbnail + length/source on the top row; the title gets its OWN full-width
-        # row beneath so a long title isn't squeezed next to the picture.
         self.thumb_lbl = ctk.CTkLabel(
             b2, text="♪", width=72, height=72, corner_radius=10,
             fg_color=THUMB_BG, text_color=MUTED, font=ctk.CTkFont(size=30))
-        self.thumb_lbl.grid(row=0, column=0, sticky="nw", padx=(0, 10), pady=(0, 2))
-        # Click the picture to open the source in a browser (handy to find trim points).
+        self.thumb_lbl.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 12))
         self.thumb_lbl.bind("<Button-1>", lambda _e: self._open_source())
+        self.title_var = tk.StringVar()
+        self.title_entry = ctk.CTkEntry(b2, textvariable=self.title_var, height=38,
+                                        font=ctk.CTkFont(size=14),
+                                        placeholder_text="(the song title loads here)")
+        self.title_entry.grid(row=0, column=1, sticky="ew")
         self.meta_var = tk.StringVar(value="Length: ...")
         ctk.CTkLabel(b2, textvariable=self.meta_var, text_color=MUTED, anchor="w",
-                     justify="left", wraplength=240, font=ctk.CTkFont(size=12)).grid(
-            row=0, column=1, sticky="nw", pady=(2, 0))
-        ctk.CTkLabel(b2, text="Title (shown in the Yoto app):", text_color=MUTED,
-                     anchor="w", font=ctk.CTkFont(size=12)).grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(10, 2))
-        self.title_var = tk.StringVar()
-        self.title_entry = ctk.CTkEntry(b2, textvariable=self.title_var, height=34,
-                                        placeholder_text="(loads after step 1)")
-        self.title_entry.grid(row=2, column=0, columnspan=2, sticky="ew")
+                     font=ctk.CTkFont(size=12)).grid(row=1, column=1, sticky="nw", pady=(4, 0))
         ctk.CTkLabel(
-            b2, text="Edit it if you like; this is the track name on the card.",
-            text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=340, justify="left",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            b2, text="This is the track name shown in the Yoto app. Edit it if you like, "
+                     "then trim it below.",
+            text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=720, justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ctk.CTkButton(b2, text="Next: Trim  ▾", width=130, height=30, fg_color=SECONDARY,
+                      hover_color=SECONDARY_H, text_color=TITLE_ON,
+                      command=lambda: self._acc_click(3)).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
-        c3, b3 = self._step(cols, 3, "Trim  (optional)")
-        c3.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=4)
+        # ===== Section 3: trim + mini player =====
+        c3, b3 = self._acc_section(3, "Trim & preview")
+        c3.grid(row=3, column=0, sticky="ew", padx=PADX, pady=4)
         b3.grid_columnconfigure(0, weight=1)
+
+        self.timeline = TrimTimeline(b3, on_change=self._on_trim_drag,
+                                     on_seek=self._on_seek, height=92)
+        self.timeline.grid(row=0, column=0, sticky="ew")
+
+        # transport: Download-to-preview (until audio ready) <-> Play / Stop + position
+        trans = ctk.CTkFrame(b3, fg_color="transparent")
+        trans.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.dl_preview_btn = ctk.CTkButton(
+            trans, text="⤓  Download to preview", height=32, fg_color=PINK, hover_color=PINK_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"), command=self._on_download_preview)
+        self.play_btn = ctk.CTkButton(
+            trans, text="▶  Play", width=110, height=32, fg_color=PINK, hover_color=PINK_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"), command=self._player_play)
+        self.stop_btn = ctk.CTkButton(
+            trans, text="■  Stop", width=90, height=32, fg_color=SECONDARY,
+            hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._player_stop)
+        self.pos_var = tk.StringVar(value="")
+        self.pos_lbl = ctk.CTkLabel(trans, textvariable=self.pos_var, text_color=MUTED,
+                                    font=ctk.CTkFont(size=12))
+        self.preview_note_var = tk.StringVar(value="")
+        self.preview_note = ctk.CTkLabel(trans, textvariable=self.preview_note_var, text_color=MUTED,
+                                         font=ctk.CTkFont(size=12), anchor="w")
+
         times = ctk.CTkFrame(b3, fg_color="transparent")
-        times.grid(row=0, column=0, sticky="ew")
+        times.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         ctk.CTkLabel(times, text="Start").grid(row=0, column=0, padx=(0, 4))
         self.start_var = tk.StringVar(value="0:00")
         self.start_entry = ctk.CTkEntry(times, textvariable=self.start_var, width=70)
@@ -350,35 +371,16 @@ class App(ctk.CTk):
         self.end_entry = ctk.CTkEntry(times, textvariable=self.end_var, width=70, placeholder_text="end")
         self.end_entry.grid(row=0, column=3)
         ctk.CTkLabel(times, text="(mm:ss)", text_color=MUTED).grid(row=0, column=4, padx=(6, 0))
-
-        # Draggable timeline: drag the handles to set the kept section. It mirrors
-        # the Start/End boxes (the boxes stay the precise source of truth).
-        self.timeline = TrimTimeline(b3, on_change=self._on_trim_drag, height=58)
-        self.timeline.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         self.start_var.trace_add("write", lambda *_: self._start_changed())
         self.end_var.trace_add("write", lambda *_: self._end_changed())
-
-        # Preview: hear a few seconds at each cut point (experimental).
-        prev = ctk.CTkFrame(b3, fg_color="transparent")
-        prev.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        self.hear_start_btn = ctk.CTkButton(
-            prev, text="▶  Hear start", width=120, height=30, fg_color=SECONDARY,
-            hover_color=SECONDARY_H, text_color=TITLE_ON, command=lambda: self._on_preview("start"))
-        self.hear_start_btn.grid(row=0, column=0, padx=(0, 6))
-        self.hear_end_btn = ctk.CTkButton(
-            prev, text="▶  Hear end", width=120, height=30, fg_color=SECONDARY,
-            hover_color=SECONDARY_H, text_color=TITLE_ON, command=lambda: self._on_preview("end"))
-        self.hear_end_btn.grid(row=0, column=1)
-        self._preview_btns = [self.hear_start_btn, self.hear_end_btn]
         ctk.CTkLabel(
-            b3, text="Drag the handles (or type Start/End) to choose the part to keep. "
-                     "Click Hear start or Hear end to listen first (experimental); the "
-                     "playing slice is shown on the timeline.",
-            text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=340, justify="left",
+            b3, text="Drag the pink handles (or type Start/End) to pick the part to keep. "
+                     "Press Play to listen, and click anywhere on the bar to jump there.",
+            text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=720, justify="left",
         ).grid(row=3, column=0, sticky="w", pady=(8, 0))
         self.trim_hint_var = tk.StringVar(value="")
         ctk.CTkLabel(b3, textvariable=self.trim_hint_var, text_color=ERR_TX,
-                     font=ctk.CTkFont(size=12, weight="bold"), wraplength=340,
+                     font=ctk.CTkFont(size=12, weight="bold"), wraplength=720,
                      justify="left").grid(row=4, column=0, sticky="w", pady=(2, 0))
 
         # --- Download (primary action) ---
@@ -386,18 +388,43 @@ class App(ctk.CTk):
             self, text="Download MP3", height=46,
             font=ctk.CTkFont(size=15, weight="bold"),
             fg_color=PINK, hover_color=PINK_HOVER, command=self._on_download)
-        self.download_btn.grid(row=3, column=0, sticky="ew", padx=PADX, pady=(8, 4))
+        self.download_btn.grid(row=4, column=0, sticky="ew", padx=PADX, pady=(10, 4))
 
         # --- Footer: progress + status ---
         self.progress = ctk.CTkProgressBar(self, progress_color=PINK)
-        self.progress.grid(row=4, column=0, sticky="ew", padx=PADX, pady=(4, 2))
+        self.progress.grid(row=5, column=0, sticky="ew", padx=PADX, pady=(4, 2))
         self.progress.set(0)
         self.status_var = tk.StringVar(value="Starting up…")
         ctk.CTkLabel(
             self, textvariable=self.status_var, anchor="w", justify="left",
-            wraplength=780, text_color=MUTED).grid(row=5, column=0, sticky="ew", padx=PADX, pady=(0, 12))
+            wraplength=780, text_color=MUTED).grid(row=6, column=0, sticky="ew", padx=PADX, pady=(0, 12))
 
         self._step3_widgets = [self.start_entry, self.end_entry]
+        self._expand(1)
+
+    # ---- accordion ------------------------------------------------------- #
+
+    def _expand(self, n: int) -> None:
+        self._expanded = n
+        for i, sec in self._sec.items():
+            if i == n:
+                sec["body"].grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 14))
+                sec["chevron"].configure(text="▾" if sec["avail"] or i == 1 else "")
+            else:
+                sec["body"].grid_remove()
+                sec["chevron"].configure(text="▸" if sec["avail"] else "")
+
+    def _acc_click(self, n: int) -> None:
+        if self._sec.get(n, {}).get("avail"):
+            self._expand(n)
+
+    def _set_section_available(self, n: int, avail: bool) -> None:
+        sec = self._sec.get(n)
+        if not sec:
+            return
+        sec["avail"] = avail
+        if n != self._expanded:
+            sec["chevron"].configure(text="▸" if avail else "")
 
     # ---- window icon + progress bar (main thread only) ------------------- #
 
@@ -474,11 +501,15 @@ class App(ctk.CTk):
         self._enable([self.url_entry, self.paste_btn, self.mode_seg], editing_link)
         self._enable([self.title_entry], loaded)
         self._enable(self._step3_widgets, loaded)
-        self._set_preview_enabled(loaded)
         try:
             self.timeline.set_locked(not loaded)
         except Exception:
             pass
+        # Accordion: section 1 reachable only while empty; 2 & 3 once a song is loaded.
+        self._set_section_available(1, state == "empty")
+        self._set_section_available(2, loaded)
+        self._set_section_available(3, loaded)
+        self._refresh_transport()
         self._refresh_download_btn()
         self.new_btn.configure(state="normal" if loaded else "disabled")
         self.several_btn.configure(
@@ -488,14 +519,6 @@ class App(ctk.CTk):
         for n, kind in _BADGES[state].items():
             self._set_badge(n, kind)
         self._refresh_go_btn()
-
-    def _set_preview_enabled(self, on: bool) -> None:
-        st = "normal" if on else "disabled"
-        for b in getattr(self, "_preview_btns", []):
-            try:
-                b.configure(state=st)
-            except Exception:
-                pass
 
     def _refresh_download_btn(self) -> None:
         ok = self.flow_state in ("loaded", "done") and self._trim_ok
@@ -724,8 +747,8 @@ class App(ctk.CTk):
         if self._bulk is not None:
             self._bulk.destroy()
             self._bulk = None
-        self.minsize(780, 690)
-        self.geometry("800x725")
+        self.minsize(780, 600)
+        self.geometry("800x670")
 
     # ---- trim: timeline <-> Start/End text + validation ------------------- #
 
@@ -804,27 +827,30 @@ class App(ctk.CTk):
     # ---- download --------------------------------------------------------- #
 
     def _on_new(self) -> None:
-        player.stop()
+        self._player.stop()
         self._cancel_playhead()
         self._prefetch_url = None
-        self._pending_preview = None
+        self._pending_play = None
+        self._seek_pos = 0.0
         self._clear_cache()
         self.info = None
         self.loaded_url = None
         self._trim_ok = True
         self.trim_hint_var.set("")
+        self.pos_var.set("")
         self._preview_img = None
         self.thumb_lbl.configure(image=None, text="♪", cursor="")
         self.url_var.set("")
-        self.mode_var.set(MODE_LINK)
-        self._on_mode_change()
         self.title_var.set("")
         self.meta_var.set("Length: ...")
         self.start_var.set("0:00")
         self.end_var.set("")
         self.timeline.set_duration(0)
         self._bar_set(0)
-        self._set_state("empty")
+        self._set_state("empty")        # set state BEFORE mode reset so it isn't skipped
+        self.mode_var.set(MODE_LINK)
+        self._on_mode_change()           # now flow_state is "empty" -> placeholders reset properly
+        self._expand(1)
         self._status("Ready. Paste a link, or search by name.")
         self.url_entry.focus_set()
 
@@ -867,7 +893,7 @@ class App(ctk.CTk):
                 i += 1
             dest = str(p)
 
-        player.stop()  # silence any preview that's playing
+        self._player.stop()  # silence any preview that's playing
         self._cancel_playhead()
         # Reuse the audio already pulled for this video (prefetch/preview), if any.
         cached = self._cached_for(url)
@@ -968,99 +994,110 @@ class App(ctk.CTk):
         self._cache_url = url
         self._cache_audio = Path(audio)
         self._cache_thumb = Path(thumb) if thumb else None
+        try:
+            self._player.load(self._cache_audio, self.info.duration if self.info else 0)
+        except Exception:
+            pass
         threading.Thread(target=self._waveform_worker, args=(url, audio), daemon=True).start()
-        pending, self._pending_preview = self._pending_preview, None
-        if pending is not None:
-            which, at, seglen = pending
-            self._play_snippet(which, url, at, seglen)
+        self._refresh_transport()
+        pending, self._pending_play = self._pending_play, None
+        if pending is not None and self.flow_state in ("loaded", "done"):
+            self._start_play(pending)
         elif self.flow_state in ("loaded", "done"):
-            self._status("Ready. You can preview or save instantly now.")
+            self._status("Ready. Press Play to listen, or just Download MP3.")
 
     def _waveform_worker(self, url: str, audio: str) -> None:
-        peaks = waveform(Path(audio), buckets=400)
+        peaks = waveform(Path(audio), buckets=480)
         if peaks:
             self.q.put(("waveform", (url, peaks)))
 
-    # ---- trim audio preview (experimental) -------------------------------- #
+    # ---- mini player (experimental, streaming) ---------------------------- #
 
-    def _on_preview(self, which: str) -> None:
+    def _refresh_transport(self) -> None:
+        """Show the right transport: Download-to-preview, Play/Stop, or a note."""
+        for w in (self.dl_preview_btn, self.play_btn, self.stop_btn, self.pos_lbl, self.preview_note):
+            w.grid_remove()
         if self.flow_state not in ("loaded", "done") or not self.loaded_url:
             return
-        self._validate_trim()
-        if not self._trim_ok:
-            messagebox.showwarning(APP_TITLE, self.trim_hint_var.get() or "Please fix the trim times first.")
+        if not self._player.is_available():
+            self.preview_note_var.set(
+                "Audio preview isn't available on this PC (you can still trim and save).")
+            self.preview_note.grid(row=0, column=0, sticky="w")
             return
-        dur = self.info.duration if self.info else 0
-        try:
-            start = max(0.0, parse_time(self.start_var.get()))
-            etext = self.end_var.get().strip()
-            end = parse_time(etext) if etext else (dur if dur > 0 else 0)
-        except ValueError:
-            return
-        seglen = 6.0
-        if which == "start":
-            at = start
-            if end and end > start:
-                seglen = min(6.0, max(1.0, end - start))
-        else:  # end
-            if not end or end <= 0:
-                self._status("To hear the end, set an End time (or load a video with a known length).")
-                return
-            at = max(0.0, end - 6.0)
-            seglen = min(6.0, end - at)
-
-        url = self.loaded_url
-        player.stop()
-        self._cancel_playhead()
-        if self._cached_for(url) is not None:
-            self._play_snippet(which, url, at, seglen)
+        if self._cached_for(self.loaded_url) is not None:
+            self.play_btn.grid(row=0, column=0, padx=(0, 6))
+            self.stop_btn.grid(row=0, column=1, padx=(0, 12))
+            self.pos_lbl.grid(row=0, column=2, sticky="w")
+        elif self._prefetch_url == self.loaded_url:
+            self.preview_note_var.set("Getting the song ready to preview...")
+            self.preview_note.grid(row=0, column=0, sticky="w")
         else:
-            # Audio still downloading (or not started): play as soon as it's ready.
-            self._pending_preview = (which, at, seglen)
-            self._ensure_audio(url)
-            self._status("Getting the song ready, then it will play. "
-                         "(The whole song downloads once so preview and saving are instant.)")
+            self.dl_preview_btn.grid(row=0, column=0, sticky="w")
 
-    def _play_snippet(self, which, url, at, seglen) -> None:
-        self._snip_seq += 1
-        threading.Thread(target=self._snippet_worker,
-                         args=(which, url, at, seglen, self._snip_seq), daemon=True).start()
+    def _fmt_pos(self, pos: float) -> str:
+        dur = self.info.duration if self.info else 0
+        return f"{fmt_time(pos)} / {fmt_time(dur)}" if dur > 0 else fmt_time(pos)
 
-    def _snippet_worker(self, which, url, at, seglen, seq) -> None:
-        try:
-            cached = self._cached_for(url)
-            if cached is None:
-                self.q.put(("preview_error", "audio not ready"))
-                return
-            audio, _thumb = cached
-            snip = self._preview_dir / f"snip_{seq}.wav"
-            ok = extract_preview(Path(audio), snip, at, seglen)
-            played = player.play(snip) if ok else False
-            self.q.put(("preview_result", (which, bool(played), at, seglen)))
-        except Exception as e:
-            self.q.put(("preview_error", str(e)))
+    def _on_download_preview(self) -> None:
+        if self.flow_state not in ("loaded", "done") or not self.loaded_url:
+            return
+        self._ensure_audio(self.loaded_url)
+        self._status("Getting the song ready to preview (downloads once, then it's instant).")
+        self._refresh_transport()
 
-    # ---- playhead animation on the timeline ------------------------------- #
+    def _player_play(self) -> None:
+        if self.flow_state not in ("loaded", "done") or not self.loaded_url:
+            return
+        if self._cached_for(self.loaded_url) is None:
+            # not downloaded yet: fetch, then auto-play from the chosen position
+            self._pending_play = self._seek_pos
+            self._ensure_audio(self.loaded_url)
+            self._status("Getting the song ready, then it will play...")
+            self._refresh_transport()
+            return
+        self._start_play(self._seek_pos)
 
-    def _animate_playhead(self, a: float, b: float) -> None:
+    def _start_play(self, from_seconds: float) -> None:
+        if self._player.play(max(0.0, from_seconds)):
+            self._status("Playing. Click anywhere on the bar to jump, or press Stop.")
+            self._begin_playhead()
+        else:
+            self._status("Couldn't play the preview on this PC, but your trim will still save fine.")
+
+    def _player_stop(self) -> None:
+        self._player.stop()
         self._cancel_playhead()
-        try:
-            self.timeline.set_play(a, b)
-        except Exception:
-            pass
-        self._ph_pos, self._ph_end = a, b
+        self._status("Stopped.")
+
+    def _on_seek(self, t: float) -> None:
+        """User clicked the waveform body: set the play-from position (and seek if playing)."""
+        if self.flow_state not in ("loaded", "done"):
+            return
+        self._seek_pos = max(0.0, float(t))
+        self.pos_var.set(self._fmt_pos(self._seek_pos))
+        if self._player.is_active():
+            self._start_play(self._seek_pos)
+
+    # ---- playhead: poll the player's true position (main thread) ---------- #
+
+    def _begin_playhead(self) -> None:
+        self._cancel_playhead()
         self._tick_playhead()
 
     def _tick_playhead(self) -> None:
-        if self._ph_pos > self._ph_end:
-            self._cancel_playhead()
-            return
+        pos = self._player.position()
         try:
-            self.timeline.set_playhead(self._ph_pos)
+            self.timeline.set_playhead(pos)
         except Exception:
             pass
-        self._ph_pos += 0.1
-        self._play_anim = self.after(100, self._tick_playhead)
+        self.pos_var.set(self._fmt_pos(pos))
+        if self._player.is_active():
+            self._play_anim = self.after(60, self._tick_playhead)
+        else:
+            self._play_anim = None
+            if self._player.has_ended():
+                self._player.stop()  # release the device/ffmpeg once it's drained
+                self._status("Finished playing. Press Play to listen again.")
 
     def _cancel_playhead(self) -> None:
         if self._play_anim is not None:
@@ -1069,10 +1106,6 @@ class App(ctk.CTk):
             except Exception:
                 pass
             self._play_anim = None
-        try:
-            self.timeline.clear_play()
-        except Exception:
-            pass
 
     # ---- thumbnail preview ------------------------------------------------ #
 
@@ -1126,9 +1159,9 @@ class App(ctk.CTk):
                     url, msg = payload  # type: ignore[misc]
                     if url == self.loaded_url:
                         self._prefetch_url = None
-                        if self._pending_preview is not None:
-                            self._pending_preview = None
-                            self._status("Couldn't get the audio to preview. You can still try Save.")
+                        self._pending_play = None
+                        self._refresh_transport()
+                        self._status("Couldn't get the audio to preview. You can still Download MP3.")
                 elif kind == "waveform":
                     url, peaks = payload  # type: ignore[misc]
                     if url == self.loaded_url:
@@ -1136,16 +1169,6 @@ class App(ctk.CTk):
                             self.timeline.set_waveform(peaks)
                         except Exception:
                             pass
-                elif kind == "preview_result":
-                    which, played, at, seglen = payload  # type: ignore[misc]
-                    if played:
-                        self._status(f"♪ Playing the {which} (from {fmt_time(at)}). "
-                                     "Adjust and listen again.")
-                        self._animate_playhead(at, at + seglen)
-                    else:
-                        self._status("Couldn't play a preview on this PC, but your trim will still save fine.")
-                elif kind == "preview_error":
-                    self._status("Couldn't prepare the preview. You can still save the MP3.")
                 elif kind == "playlist_detected":
                     self._on_playlist_detected(str(payload))
                 elif kind == "ytdlp":
@@ -1157,6 +1180,7 @@ class App(ctk.CTk):
                     if self.flow_state == "starting":
                         self._bar_set(0)
                         self._set_state("empty")
+                        self._expand(1)
                 elif kind == "done":
                     self._on_done(Path(str(payload)))
                 elif kind == "setup_error":
@@ -1203,16 +1227,22 @@ class App(ctk.CTk):
         # Essential state first, so a cosmetic failure below can never leave the
         # screen stuck in "loading" (the cause of the old "something went wrong,
         # no way to retry" bug). Everything after this is wrapped + best-effort.
-        player.stop()
+        self._player.stop()
         self._cancel_playhead()
         self._prefetch_url = None
-        self._pending_preview = None
+        self._pending_play = None
+        self._seek_pos = 0.0
         self._clear_cache()
+        try:
+            self._player.load(None, info.duration)  # drop the previous song's audio
+        except Exception:
+            pass
         self.info = info
         self.loaded_url = url
         self._preview_img = None
         self._trim_ok = True
         self.trim_hint_var.set("")
+        self.pos_var.set("")
         try:
             self.title_var.set(info.title)
             meta = f"Length: {fmt_time(info.duration)}" if info.duration > 0 else "Length: unknown"
@@ -1234,6 +1264,7 @@ class App(ctk.CTk):
             self._validate_trim()
         except Exception:
             pass
+        self._expand(2)              # accordion advances to "Check the song"
         self._status(f"✓ Loaded: {info.title}"[:140])
         # Fetch the cover preview, and prefetch the audio so preview/save are instant.
         if info.thumbnail:
@@ -1251,6 +1282,7 @@ class App(ctk.CTk):
     def _on_playlist_detected(self, url: str) -> None:
         self._bar_set(0)
         self._set_state("empty")
+        self._expand(1)
         self._status("That link is a playlist.")
         self._ask_choice(
             "That link is a playlist of songs.\n\nImport every song into "
@@ -1269,7 +1301,9 @@ class App(ctk.CTk):
         self._bar_set(0)
         # return to the step the user can act on: re-enter the link, or retry download
         self._set_state("empty" if self.flow_state in ("loading", "starting") else "loaded")
-        if self.flow_state in ("loaded", "done"):
+        if self.flow_state == "empty":
+            self._expand(1)
+        else:
             self._validate_trim()
         self._status("")
         messagebox.showerror(APP_TITLE, message)
@@ -1327,7 +1361,7 @@ class App(ctk.CTk):
         except Exception:
             pass
         try:
-            player.stop()
+            self._player.close()
         except Exception:
             pass
         try:

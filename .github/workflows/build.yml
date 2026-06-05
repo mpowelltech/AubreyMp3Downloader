@@ -22,6 +22,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      - name: Verify audio backend installed
+        run: python -c "import miniaudio; print('miniaudio', miniaudio.__version__)"
+
       - name: Download static ffmpeg
         shell: pwsh
         run: |

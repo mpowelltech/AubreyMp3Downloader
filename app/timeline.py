@@ -39,9 +39,11 @@ def _hex(name: str) -> str:
 
 
 class TrimTimeline(ctk.CTkFrame):
-    def __init__(self, master, on_change: Callable[[float, float], None], height: int = 60) -> None:
+    def __init__(self, master, on_change: Callable[[float, float], None],
+                 on_seek: Optional[Callable[[float], None]] = None, height: int = 60) -> None:
         super().__init__(master, fg_color="transparent")
         self.on_change = on_change
+        self.on_seek = on_seek
         self.duration = 0.0
         self.start = 0.0
         self.end = 0.0
@@ -68,7 +70,7 @@ class TrimTimeline(ctk.CTkFrame):
             self.end = self.duration
         self.peaks = None
         self._play = None
-        self._playhead = None
+        self._playhead = 0.0 if self._enabled else None
         self._redraw()
 
     def set_trim(self, start: float, end: float) -> None:
@@ -122,6 +124,7 @@ class TrimTimeline(ctk.CTkFrame):
             return
         x = event.x
         sx, ex = self._x(self.start), self._x(self.end)
+        # On a handle -> drag the trim. Anywhere else -> set the playback position.
         if abs(x - sx) <= GRAB and abs(x - ex) <= GRAB:
             self._drag = "start" if x <= (sx + ex) / 2 else "end"
         elif abs(x - sx) <= GRAB:
@@ -129,8 +132,16 @@ class TrimTimeline(ctk.CTkFrame):
         elif abs(x - ex) <= GRAB:
             self._drag = "end"
         else:
-            # click in the body: move whichever handle is nearer to where you clicked
-            self._drag = "start" if abs(x - sx) <= abs(x - ex) else "end"
+            self._drag = None
+            t = self._t(x)
+            self._playhead = t
+            self._redraw()
+            if self.on_seek:
+                try:
+                    self.on_seek(t)
+                except Exception:
+                    pass
+            return
         self._on_motion(event)
 
     def _on_motion(self, event) -> None:
