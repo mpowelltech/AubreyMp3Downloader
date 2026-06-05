@@ -27,10 +27,12 @@ YouTube and many other sites (Vimeo, SoundCloud, …).
    * **Search by name** — type a song name (e.g. *Twinkle Twinkle Little Star*),
      click **Search**, and pick from the list. No link needed.
 2. The title and length fill in, and a little picture of the song appears.
-3. (Optional) Trim it. Set a **Start** / **End** time, or type seconds into
-   **Skip first** / **Skip last**. The two ways stay in sync, so use whichever is
-   easier. Click **▶ Hear start** / **▶ Hear end** to listen to those few seconds
-   first, so you know the cut is right *(experimental)*.
+3. (Optional) Trim it. Drag the handles on the **timeline** to choose the part to
+   keep, or type a **Start** / **End** time (mm:ss). They stay in sync, so use
+   whichever is easier. Click **Hear start** / **Hear end** to listen to those few
+   seconds first, so you know the cut is right *(experimental)*. The whole song
+   downloads once in the background when it loads, so previewing and saving are
+   then instant.
 4. (Optional) Edit the **Title**. This is what shows under the track in Yoto.
 5. Click **Download MP3** and choose where to save it.
 6. To do another, click **Start over**.

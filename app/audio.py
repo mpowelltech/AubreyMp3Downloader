@@ -117,6 +117,40 @@ def extract_preview(audio_in: Path, out_wav: Path, start: float, dur: float = 6.
     return rc == 0 and out_wav.exists() and out_wav.stat().st_size > 1024
 
 
+def waveform(audio_in: Path, buckets: int = 400):
+    """Return a list of ~``buckets`` peaks (0..1) for drawing a waveform, or None.
+
+    Best-effort: decodes to low-rate mono PCM via ffmpeg and reduces to peaks.
+    """
+    import array
+    cmd = [ffmpeg_binary(), "-v", "error", "-i", str(audio_in),
+           "-ac", "1", "-ar", "4000", "-f", "s16le", "-"]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=120, **_no_window())
+        raw = proc.stdout
+        if proc.returncode != 0 or not raw:
+            return None
+        samples = array.array("h")
+        samples.frombytes(raw[: (len(raw) // 2) * 2])
+        n = len(samples)
+        if n == 0:
+            return None
+        buckets = max(20, min(buckets, n))
+        step = n / buckets
+        peaks = []
+        peak_max = 1
+        for i in range(buckets):
+            lo, hi = int(i * step), int((i + 1) * step)
+            seg = samples[lo:hi] or samples[lo:lo + 1]
+            m = max((abs(s) for s in seg), default=0)
+            peaks.append(m)
+            peak_max = max(peak_max, m)
+        return [p / peak_max for p in peaks]
+    except Exception:
+        return None
+
+
 def _hint(err: str) -> str:
     s = (err or "").lower()
     if "no space left" in s:

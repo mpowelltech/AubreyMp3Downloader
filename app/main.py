@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import webbrowser
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -31,11 +32,12 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from . import __version__, player
-from .audio import extract_preview, make_mp3
+from .audio import extract_preview, make_mp3, waveform
 from .downloader import (DownloadError, VideoInfo, download_audio, fetch_info,
                          has_playlist, has_single_video, looks_like_url, search)
 from .media import fetch_image
 from .paths import ffmpeg_binary, resource_path
+from .timeline import TrimTimeline
 from .updater import (check_for_app_update, download_and_relaunch, ensure_deno,
                       ensure_ytdlp, update_in_background)
 
@@ -156,8 +158,8 @@ class App(ctk.CTk):
         # Logical sizes — customtkinter scales these up by the display DPI, so
         # this is correct on HiDPI (don't measure/raw-set: DPI is unknown until
         # the window maps). Overlays (search/bulk) sit on top; lists scroll.
-        self.geometry("800x690")
-        self.minsize(780, 660)
+        self.geometry("800x725")
+        self.minsize(780, 690)
         self.configure(fg_color=WINDOW_BG)
         self._apply_icon()
 
@@ -174,13 +176,20 @@ class App(ctk.CTk):
         self._trim_ok = True     # current trim values parse + make sense
         self._bulk = None        # the bulk overlay frame, when open
         self._chooser = None     # the search-results overlay, when open
+        self._choice = None      # a custom choice dialog overlay, when open
         self._preview_img = None # keep a ref so the CTkImage isn't garbage-collected
         # --- trim audio preview (experimental) ---
+        # We download the full audio ONCE in the background as soon as a song loads,
+        # cache it, and reuse it for both previews and the final export.
         self._preview_dir = Path(tempfile.mkdtemp(prefix="aubreyprev_"))
-        self._preview_busy = False
         self._cache_url: str | None = None   # which video the cached audio belongs to
         self._cache_audio: Path | None = None
         self._cache_thumb: Path | None = None
+        self._prefetch_url: str | None = None   # url whose audio is downloading now
+        self._pending_preview = None            # (which, at, seglen) to play once ready
+        self._snip_seq = 0                      # unique preview-snippet filenames
+        self._audio_seq = 0                     # unique per-song audio subdirs
+        self._play_anim = None                  # after-id of the playhead animation
         self._badges: dict[int, ctk.CTkLabel] = {}
         self._titles: dict[int, ctk.CTkLabel] = {}
         self.q: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -303,60 +312,55 @@ class App(ctk.CTk):
         c2, b2 = self._step(cols, 2, "Check the song")
         c2.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=4)
         b2.grid_columnconfigure(1, weight=1)
+        # Thumbnail + length/source on the top row; the title gets its OWN full-width
+        # row beneath so a long title isn't squeezed next to the picture.
         self.thumb_lbl = ctk.CTkLabel(
-            b2, text="♪", width=76, height=76, corner_radius=10,
+            b2, text="♪", width=72, height=72, corner_radius=10,
             fg_color=THUMB_BG, text_color=MUTED, font=ctk.CTkFont(size=30))
-        self.thumb_lbl.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 10), pady=(0, 2))
-        self.title_var = tk.StringVar()
-        self.title_entry = ctk.CTkEntry(b2, textvariable=self.title_var,
-                                        placeholder_text="(loads after step 1)")
-        self.title_entry.grid(row=0, column=1, sticky="ew")
-        self.meta_var = tk.StringVar(value="Length: –")
-        ctk.CTkLabel(b2, textvariable=self.meta_var, text_color=MUTED,
+        self.thumb_lbl.grid(row=0, column=0, sticky="nw", padx=(0, 10), pady=(0, 2))
+        # Click the picture to open the source in a browser (handy to find trim points).
+        self.thumb_lbl.bind("<Button-1>", lambda _e: self._open_source())
+        self.meta_var = tk.StringVar(value="Length: ...")
+        ctk.CTkLabel(b2, textvariable=self.meta_var, text_color=MUTED, anchor="w",
+                     justify="left", wraplength=240, font=ctk.CTkFont(size=12)).grid(
+            row=0, column=1, sticky="nw", pady=(2, 0))
+        ctk.CTkLabel(b2, text="Title (shown in the Yoto app):", text_color=MUTED,
                      anchor="w", font=ctk.CTkFont(size=12)).grid(
-            row=1, column=1, sticky="ew", pady=(4, 0))
+            row=1, column=0, columnspan=2, sticky="w", pady=(10, 2))
+        self.title_var = tk.StringVar()
+        self.title_entry = ctk.CTkEntry(b2, textvariable=self.title_var, height=34,
+                                        placeholder_text="(loads after step 1)")
+        self.title_entry.grid(row=2, column=0, columnspan=2, sticky="ew")
         ctk.CTkLabel(
-            b2, text="This is the name shown under the track in the Yoto app. Edit it if you like.",
+            b2, text="Edit it if you like; this is the track name on the card.",
             text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=340, justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         c3, b3 = self._step(cols, 3, "Trim  (optional)")
         c3.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=4)
+        b3.grid_columnconfigure(0, weight=1)
         times = ctk.CTkFrame(b3, fg_color="transparent")
         times.grid(row=0, column=0, sticky="ew")
         ctk.CTkLabel(times, text="Start").grid(row=0, column=0, padx=(0, 4))
         self.start_var = tk.StringVar(value="0:00")
-        self.start_entry = ctk.CTkEntry(times, textvariable=self.start_var, width=66)
+        self.start_entry = ctk.CTkEntry(times, textvariable=self.start_var, width=70)
         self.start_entry.grid(row=0, column=1)
         ctk.CTkLabel(times, text="End").grid(row=0, column=2, padx=(12, 4))
         self.end_var = tk.StringVar()
-        self.end_entry = ctk.CTkEntry(times, textvariable=self.end_var, width=66, placeholder_text="end")
+        self.end_entry = ctk.CTkEntry(times, textvariable=self.end_var, width=70, placeholder_text="end")
         self.end_entry.grid(row=0, column=3)
         ctk.CTkLabel(times, text="(mm:ss)", text_color=MUTED).grid(row=0, column=4, padx=(6, 0))
-        ctk.CTkLabel(b3, text="or", text_color=MUTED, font=ctk.CTkFont(size=12, slant="italic")).grid(
-            row=1, column=0, sticky="w", pady=(4, 0))
-        quick = ctk.CTkFrame(b3, fg_color="transparent")
-        quick.grid(row=2, column=0, sticky="ew", pady=(2, 0))
-        ctk.CTkLabel(quick, text="Skip first").grid(row=0, column=0, padx=(0, 4))
-        self.skipfirst_var = tk.StringVar(value="0")
-        self.skipfirst_entry = ctk.CTkEntry(quick, textvariable=self.skipfirst_var, width=46)
-        self.skipfirst_entry.grid(row=0, column=1)
-        ctk.CTkLabel(quick, text="sec").grid(row=0, column=2, padx=(3, 0))
-        ctk.CTkLabel(quick, text="Skip last").grid(row=0, column=3, padx=(12, 4))
-        self.skiplast_var = tk.StringVar(value="0")
-        self.skiplast_entry = ctk.CTkEntry(quick, textvariable=self.skiplast_var, width=46)
-        self.skiplast_entry.grid(row=0, column=4)
-        ctk.CTkLabel(quick, text="sec").grid(row=0, column=5, padx=(3, 0))
-        # Start/End and Skip first/last are two views of the SAME trim: editing
-        # one updates the other live. self._syncing breaks the feedback loop.
-        self.skipfirst_var.trace_add("write", lambda *_: self._skip_first())
-        self.skiplast_var.trace_add("write", lambda *_: self._skip_last())
+
+        # Draggable timeline: drag the handles to set the kept section. It mirrors
+        # the Start/End boxes (the boxes stay the precise source of truth).
+        self.timeline = TrimTimeline(b3, on_change=self._on_trim_drag, height=58)
+        self.timeline.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         self.start_var.trace_add("write", lambda *_: self._start_changed())
         self.end_var.trace_add("write", lambda *_: self._end_changed())
 
         # Preview: hear a few seconds at each cut point (experimental).
         prev = ctk.CTkFrame(b3, fg_color="transparent")
-        prev.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        prev.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.hear_start_btn = ctk.CTkButton(
             prev, text="▶  Hear start", width=120, height=30, fg_color=SECONDARY,
             hover_color=SECONDARY_H, text_color=TITLE_ON, command=lambda: self._on_preview("start"))
@@ -367,15 +371,15 @@ class App(ctk.CTk):
         self.hear_end_btn.grid(row=0, column=1)
         self._preview_btns = [self.hear_start_btn, self.hear_end_btn]
         ctk.CTkLabel(
-            b3, text="Tip: click Hear start / Hear end to listen to those few seconds before "
-                     "you save (experimental). Two ways to set the same trim — Start/End times "
-                     "or Skip first/last seconds — change either and the other matches.",
+            b3, text="Drag the handles (or type Start/End) to choose the part to keep. "
+                     "Click Hear start or Hear end to listen first (experimental); the "
+                     "playing slice is shown on the timeline.",
             text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=340, justify="left",
-        ).grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
         self.trim_hint_var = tk.StringVar(value="")
         ctk.CTkLabel(b3, textvariable=self.trim_hint_var, text_color=ERR_TX,
                      font=ctk.CTkFont(size=12, weight="bold"), wraplength=340,
-                     justify="left").grid(row=5, column=0, sticky="w", pady=(2, 0))
+                     justify="left").grid(row=4, column=0, sticky="w", pady=(2, 0))
 
         # --- Download (primary action) ---
         self.download_btn = ctk.CTkButton(
@@ -393,9 +397,7 @@ class App(ctk.CTk):
             self, textvariable=self.status_var, anchor="w", justify="left",
             wraplength=780, text_color=MUTED).grid(row=5, column=0, sticky="ew", padx=PADX, pady=(0, 12))
 
-        self._step3_widgets = [
-            self.start_entry, self.end_entry, self.skipfirst_entry, self.skiplast_entry,
-        ]
+        self._step3_widgets = [self.start_entry, self.end_entry]
 
     # ---- window icon + progress bar (main thread only) ------------------- #
 
@@ -472,11 +474,15 @@ class App(ctk.CTk):
         self._enable([self.url_entry, self.paste_btn, self.mode_seg], editing_link)
         self._enable([self.title_entry], loaded)
         self._enable(self._step3_widgets, loaded)
-        self._set_preview_enabled(loaded and not self._preview_busy)
+        self._set_preview_enabled(loaded)
+        try:
+            self.timeline.set_locked(not loaded)
+        except Exception:
+            pass
         self._refresh_download_btn()
-        self.new_btn.configure(state="normal" if (loaded and not self._preview_busy) else "disabled")
+        self.new_btn.configure(state="normal" if loaded else "disabled")
         self.several_btn.configure(
-            state="normal" if (self.ready and not self._searching and not self._preview_busy
+            state="normal" if (self.ready and not self._searching
                                and state in ("empty", "loaded", "done")) else "disabled")
 
         for n, kind in _BADGES[state].items():
@@ -492,7 +498,7 @@ class App(ctk.CTk):
                 pass
 
     def _refresh_download_btn(self) -> None:
-        ok = self.flow_state in ("loaded", "done") and self._trim_ok and not self._preview_busy
+        ok = self.flow_state in ("loaded", "done") and self._trim_ok
         self._set_action(self.download_btn, ok)
 
     def _refresh_go_btn(self) -> None:
@@ -552,7 +558,7 @@ class App(ctk.CTk):
         self.url_entry.focus_set()
 
     def _on_go(self) -> None:
-        if self.flow_state != "empty" or not self.ready or self._searching:
+        if self.flow_state != "empty" or not self.ready or self._searching or self._choice is not None:
             return
         raw = self.url_var.get().strip()
         if not raw:
@@ -573,27 +579,49 @@ class App(ctk.CTk):
             return
         self._load_url(url)
 
+    def _ask_choice(self, message: str, buttons, on_choice) -> None:
+        """Show a custom in-window dialog with relabelled buttons (no Yes/No/Cancel).
+
+        ``buttons`` is a list of (label, value); ``on_choice(value)`` runs after the
+        dialog closes. Uses an overlay frame, not a Toplevel (flaky on macOS).
+        """
+        if self._choice is not None:
+            return
+
+        def done(value):
+            if self._choice is not None:
+                self._choice.destroy()
+                self._choice = None
+            on_choice(value)
+
+        try:
+            self._choice = ChoiceOverlay(self, message, buttons, done)
+            self._choice.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self._choice.tkraise()
+        except Exception:
+            self._choice = None
+
     def _handle_playlist_link(self, url: str) -> None:
         """A link that carries a playlist: offer the whole list vs. one song."""
-        if has_single_video(url):
-            ans = messagebox.askyesnocancel(
-                APP_TITLE,
-                "This link includes a whole playlist.\n\n"
-                "• Yes  – get every song (opens “Download several”)\n"
-                "• No   – just this one song\n"
-                "• Cancel – do nothing")
-            if ans is None:
-                return
-            if ans:
+        def route(value):
+            if value == "playlist":
                 self._open_bulk_with_playlist(url)
-            else:
+            elif value == "single":
                 self._load_url(url)
+
+        if has_single_video(url):
+            self._ask_choice(
+                "This link includes a whole playlist.\n\nWhat would you like to do?",
+                [("Import whole playlist", "playlist"),
+                 ("Just this one song", "single"),
+                 ("Cancel", "cancel")],
+                route)
         else:
-            if messagebox.askyesno(
-                APP_TITLE,
-                "This looks like a playlist of songs.\n\n"
-                "Open “Download several” to grab them all?"):
-                self._open_bulk_with_playlist(url)
+            self._ask_choice(
+                "This looks like a playlist of songs.\n\nImport every song into "
+                "“Download several”?",
+                [("Import whole playlist", "playlist"), ("Cancel", "cancel")],
+                route)
 
     def _load_url(self, url: str) -> None:
         self.loaded_url = url
@@ -668,7 +696,7 @@ class App(ctk.CTk):
     def _on_several(self) -> None:
         if (not self.ready or self._searching
                 or self.flow_state in ("starting", "loading", "downloading")
-                or self._bulk is not None or self._chooser is not None):
+                or self._bulk is not None or self._chooser is not None or self._choice is not None):
             return
         self._open_bulk()
 
@@ -676,7 +704,7 @@ class App(ctk.CTk):
         from .bulk import BulkView  # lazy import avoids a circular import at startup
         try:
             self.minsize(770, 560)
-            self.geometry("800x660")  # logical; list scrolls so height stays put
+            self.geometry("800x680")  # logical; list scrolls so height stays put
             self._bulk = BulkView(self)
             self._bulk.place(relx=0, rely=0, relwidth=1, relheight=1)
             self._bulk.tkraise()
@@ -696,61 +724,53 @@ class App(ctk.CTk):
         if self._bulk is not None:
             self._bulk.destroy()
             self._bulk = None
-        self.minsize(770, 610)
-        self.geometry("800x640")
+        self.minsize(780, 690)
+        self.geometry("800x725")
 
-    # ---- trim mirror + validation ---------------------------------------- #
+    # ---- trim: timeline <-> Start/End text + validation ------------------- #
 
     def _sync_set(self, var, value) -> None:
-        """Set one trim var without retriggering the opposite mirror handler."""
+        """Set a trim var without retriggering its own trace handler."""
         self._syncing = True
         try:
             var.set(value)
         finally:
             self._syncing = False
 
-    def _skip_first(self) -> None:        # Skip first -> Start
-        if self._syncing or self.flow_state not in ("loaded", "done"):
+    def _on_trim_drag(self, start: float, end: float) -> None:
+        """The user dragged a timeline handle: push the values into the text boxes."""
+        if self.flow_state not in ("loaded", "done"):
             return
-        try:
-            n = float(self.skipfirst_var.get() or 0)
-        except ValueError:
-            self._validate_trim(); return
-        self._sync_set(self.start_var, fmt_time(max(0, n)))
+        self._sync_set(self.start_var, fmt_time(start))
+        self._sync_set(self.end_var, fmt_time(end))
         self._validate_trim()
 
-    def _skip_last(self) -> None:         # Skip last -> End
-        if self._syncing or self.flow_state not in ("loaded", "done") or not self.info:
-            return
-        try:
-            n = float(self.skiplast_var.get() or 0)
-        except ValueError:
-            self._validate_trim(); return
-        if self.info.duration > 0:
-            self._sync_set(self.end_var, fmt_time(max(0, self.info.duration - n)))
-        self._validate_trim()
-
-    def _start_changed(self) -> None:     # Start -> Skip first
+    def _start_changed(self) -> None:
         if self._syncing or self.flow_state not in ("loaded", "done"):
             return
-        try:
-            s = parse_time(self.start_var.get())
-        except ValueError:
-            self._validate_trim(); return
-        self._sync_set(self.skipfirst_var, str(int(round(max(0, s)))))
+        self._push_text_to_timeline()
         self._validate_trim()
 
-    def _end_changed(self) -> None:       # End -> Skip last
+    def _end_changed(self) -> None:
         if self._syncing or self.flow_state not in ("loaded", "done"):
             return
-        text = self.end_var.get().strip()
-        if text and self.info and self.info.duration > 0:
-            try:
-                e = parse_time(text)
-                self._sync_set(self.skiplast_var, str(int(round(max(0, self.info.duration - e)))))
-            except ValueError:
-                pass
+        self._push_text_to_timeline()
         self._validate_trim()
+
+    def _push_text_to_timeline(self) -> None:
+        """Reflect the Start/End text on the timeline (no-op if the text is invalid)."""
+        if not self.info or self.info.duration <= 0:
+            return
+        try:
+            s = max(0.0, parse_time(self.start_var.get()))
+        except ValueError:
+            return
+        etext = self.end_var.get().strip()
+        try:
+            e = parse_time(etext) if etext else self.info.duration
+        except ValueError:
+            return
+        self.timeline.set_trim(s, e)
 
     def _validate_trim(self) -> None:
         """Check the trim makes sense; show a hint and gate Download accordingly."""
@@ -761,7 +781,7 @@ class App(ctk.CTk):
         try:
             start = parse_time(self.start_var.get())
         except ValueError:
-            msg = "Start time isn't valid — use mm:ss (e.g. 1:05)."
+            msg = "Start time isn't valid. Use mm:ss, like 1:05."
             start = None
         end = None
         if not msg:
@@ -770,7 +790,7 @@ class App(ctk.CTk):
                 try:
                     end = parse_time(etext)
                 except ValueError:
-                    msg = "End time isn't valid — use mm:ss (e.g. 2:30)."
+                    msg = "End time isn't valid. Use mm:ss, like 2:30."
         if not msg and start is not None and start < 0:
             msg = "Start time can't be negative."
         if not msg and start is not None and dur > 0 and start >= dur:
@@ -785,22 +805,24 @@ class App(ctk.CTk):
 
     def _on_new(self) -> None:
         player.stop()
+        self._cancel_playhead()
+        self._prefetch_url = None
+        self._pending_preview = None
         self._clear_cache()
         self.info = None
         self.loaded_url = None
         self._trim_ok = True
         self.trim_hint_var.set("")
         self._preview_img = None
-        self.thumb_lbl.configure(image=None, text="♪")
+        self.thumb_lbl.configure(image=None, text="♪", cursor="")
         self.url_var.set("")
         self.mode_var.set(MODE_LINK)
         self._on_mode_change()
         self.title_var.set("")
-        self.meta_var.set("Length: –")
+        self.meta_var.set("Length: ...")
         self.start_var.set("0:00")
         self.end_var.set("")
-        self.skipfirst_var.set("0")
-        self.skiplast_var.set("0")
+        self.timeline.set_duration(0)
         self._bar_set(0)
         self._set_state("empty")
         self._status("Ready. Paste a link, or search by name.")
@@ -846,11 +868,12 @@ class App(ctk.CTk):
             dest = str(p)
 
         player.stop()  # silence any preview that's playing
-        # Reuse the audio we already pulled for the preview, if it's the same video.
+        self._cancel_playhead()
+        # Reuse the audio already pulled for this video (prefetch/preview), if any.
         cached = self._cached_for(url)
         dur = self.info.duration if self.info else 0
         self._set_state("downloading")
-        self._status("Preparing…")
+        self._status("Preparing..." if cached else "Downloading audio...")
         self._bar_indeterminate()
         threading.Thread(
             target=self._download_worker,
@@ -865,13 +888,20 @@ class App(ctk.CTk):
         return None
 
     def _clear_cache(self) -> None:
-        """Forget the cached preview audio and tidy its files (best-effort)."""
+        """Forget the cached preview audio and tidy its files/subdirs (best-effort)."""
         self._cache_url = None
         self._cache_audio = None
         self._cache_thumb = None
+        import shutil
         try:
-            for f in self._preview_dir.glob("*"):
-                f.unlink()
+            for p in self._preview_dir.iterdir():
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
         except Exception:
             pass
 
@@ -907,10 +937,54 @@ class App(ctk.CTk):
         except Exception as e:
             self.q.put(("error", f"Something went wrong.\n\n{e}"))
 
+    # ---- background audio prefetch (so preview + save are instant) -------- #
+
+    def _ensure_audio(self, url: str) -> None:
+        """Start downloading the full audio for ``url`` in the background (once)."""
+        if self._cached_for(url) is not None or self._prefetch_url == url:
+            return
+        self._prefetch_url = url
+        self._audio_seq += 1
+        # A fresh subdir per song so a previous (still-finishing) prefetch can't
+        # collide on the "audio.<ext>" output name.
+        sub = self._preview_dir / f"v{self._audio_seq}"
+        try:
+            sub.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            sub = self._preview_dir
+        threading.Thread(target=self._prefetch_worker, args=(url, sub), daemon=True).start()
+
+    def _prefetch_worker(self, url: str, workdir: Path) -> None:
+        try:
+            audio, thumb = download_audio(self.ytdlp, url, workdir, deno=self.deno)
+            self.q.put(("audio_ready", (url, str(audio), str(thumb) if thumb else "")))
+        except Exception as e:
+            self.q.put(("audio_error", (url, str(e))))
+
+    def _on_audio_ready(self, url: str, audio: str, thumb: str) -> None:
+        if url != self.loaded_url:
+            return  # the user moved on to a different song
+        self._prefetch_url = None
+        self._cache_url = url
+        self._cache_audio = Path(audio)
+        self._cache_thumb = Path(thumb) if thumb else None
+        threading.Thread(target=self._waveform_worker, args=(url, audio), daemon=True).start()
+        pending, self._pending_preview = self._pending_preview, None
+        if pending is not None:
+            which, at, seglen = pending
+            self._play_snippet(which, url, at, seglen)
+        elif self.flow_state in ("loaded", "done"):
+            self._status("Ready. You can preview or save instantly now.")
+
+    def _waveform_worker(self, url: str, audio: str) -> None:
+        peaks = waveform(Path(audio), buckets=400)
+        if peaks:
+            self.q.put(("waveform", (url, peaks)))
+
     # ---- trim audio preview (experimental) -------------------------------- #
 
     def _on_preview(self, which: str) -> None:
-        if self.flow_state not in ("loaded", "done") or self._preview_busy or not self.loaded_url:
+        if self.flow_state not in ("loaded", "done") or not self.loaded_url:
             return
         self._validate_trim()
         if not self._trim_ok:
@@ -936,39 +1010,69 @@ class App(ctk.CTk):
             seglen = min(6.0, end - at)
 
         url = self.loaded_url
-        cached = self._cached_for(url)
-        self._preview_busy = True
         player.stop()
-        self._set_state(self.flow_state)  # re-gates: locks buttons while preparing
-        if cached is None:
-            self._status("Getting the audio to preview… (first time for this song)")
-            self._bar_indeterminate()
+        self._cancel_playhead()
+        if self._cached_for(url) is not None:
+            self._play_snippet(which, url, at, seglen)
         else:
-            self._status("Preparing preview…")
-        threading.Thread(target=self._preview_worker,
-                         args=(which, url, at, seglen, cached), daemon=True).start()
+            # Audio still downloading (or not started): play as soon as it's ready.
+            self._pending_preview = (which, at, seglen)
+            self._ensure_audio(url)
+            self._status("Getting the song ready, then it will play. "
+                         "(The whole song downloads once so preview and saving are instant.)")
 
-    def _preview_worker(self, which, url, at, seglen, cached) -> None:
+    def _play_snippet(self, which, url, at, seglen) -> None:
+        self._snip_seq += 1
+        threading.Thread(target=self._snippet_worker,
+                         args=(which, url, at, seglen, self._snip_seq), daemon=True).start()
+
+    def _snippet_worker(self, which, url, at, seglen, seq) -> None:
         try:
-            if cached is not None:
-                audio, _thumb = cached
-            else:
-                audio, thumb = download_audio(
-                    self.ytdlp, url, self._preview_dir, deno=self.deno,
-                    on_progress=lambda p: self.q.put(("progress", p / 100.0)))
-                self.q.put(("preview_cached", (url, str(audio), str(thumb) if thumb else "")))
-            snip = self._preview_dir / f"snip_{which}.wav"
-            self.q.put(("busy_bar", None))
-            self.q.put(("status", "Preparing preview…"))
+            cached = self._cached_for(url)
+            if cached is None:
+                self.q.put(("preview_error", "audio not ready"))
+                return
+            audio, _thumb = cached
+            snip = self._preview_dir / f"snip_{seq}.wav"
             ok = extract_preview(Path(audio), snip, at, seglen)
             played = player.play(snip) if ok else False
-            self.q.put(("preview_result", (which, bool(played), fmt_time(at))))
-        except DownloadError as e:
-            self.q.put(("preview_error", str(e)))
+            self.q.put(("preview_result", (which, bool(played), at, seglen)))
         except Exception as e:
             self.q.put(("preview_error", str(e)))
-        finally:
-            self.q.put(("preview_done", None))
+
+    # ---- playhead animation on the timeline ------------------------------- #
+
+    def _animate_playhead(self, a: float, b: float) -> None:
+        self._cancel_playhead()
+        try:
+            self.timeline.set_play(a, b)
+        except Exception:
+            pass
+        self._ph_pos, self._ph_end = a, b
+        self._tick_playhead()
+
+    def _tick_playhead(self) -> None:
+        if self._ph_pos > self._ph_end:
+            self._cancel_playhead()
+            return
+        try:
+            self.timeline.set_playhead(self._ph_pos)
+        except Exception:
+            pass
+        self._ph_pos += 0.1
+        self._play_anim = self.after(100, self._tick_playhead)
+
+    def _cancel_playhead(self) -> None:
+        if self._play_anim is not None:
+            try:
+                self.after_cancel(self._play_anim)
+            except Exception:
+                pass
+            self._play_anim = None
+        try:
+            self.timeline.clear_play()
+        except Exception:
+            pass
 
     # ---- thumbnail preview ------------------------------------------------ #
 
@@ -976,6 +1080,15 @@ class App(ctk.CTk):
         img = fetch_image(thumb_url, box=160)
         if img is not None:
             self.q.put(("thumb", (url, img)))
+
+    def _open_source(self) -> None:
+        """Open the loaded video in the default browser (e.g. to find trim points)."""
+        url = self.loaded_url
+        if url and str(url).startswith("http"):
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
 
     def _apply_thumb(self, url: str, pil_img) -> None:
         if url != self.loaded_url:
@@ -1007,25 +1120,32 @@ class App(ctk.CTk):
                 elif kind == "thumb":
                     url, img = payload  # type: ignore[misc]
                     self._apply_thumb(url, img)
-                elif kind == "preview_cached":
-                    url, audio, thumb = payload  # type: ignore[misc]
-                    if url == self.loaded_url:  # ignore a result for a video we left
-                        self._cache_url = url
-                        self._cache_audio = Path(audio)
-                        self._cache_thumb = Path(thumb) if thumb else None
+                elif kind == "audio_ready":
+                    self._on_audio_ready(*payload)  # type: ignore[misc]
+                elif kind == "audio_error":
+                    url, msg = payload  # type: ignore[misc]
+                    if url == self.loaded_url:
+                        self._prefetch_url = None
+                        if self._pending_preview is not None:
+                            self._pending_preview = None
+                            self._status("Couldn't get the audio to preview. You can still try Save.")
+                elif kind == "waveform":
+                    url, peaks = payload  # type: ignore[misc]
+                    if url == self.loaded_url:
+                        try:
+                            self.timeline.set_waveform(peaks)
+                        except Exception:
+                            pass
                 elif kind == "preview_result":
-                    which, played, at = payload  # type: ignore[misc]
+                    which, played, at, seglen = payload  # type: ignore[misc]
                     if played:
-                        self._status(f"♪ Playing the {which} (from {at}). Adjust the time and listen again.")
+                        self._status(f"♪ Playing the {which} (from {fmt_time(at)}). "
+                                     "Adjust and listen again.")
+                        self._animate_playhead(at, at + seglen)
                     else:
-                        self._status("Couldn't play a preview on this PC — your trim will still save fine.")
+                        self._status("Couldn't play a preview on this PC, but your trim will still save fine.")
                 elif kind == "preview_error":
                     self._status("Couldn't prepare the preview. You can still save the MP3.")
-                elif kind == "preview_done":
-                    self._preview_busy = False
-                    self._bar_set(0)
-                    if self.flow_state in ("loaded", "done"):
-                        self._set_state(self.flow_state)  # re-enable buttons
                 elif kind == "playlist_detected":
                     self._on_playlist_detected(str(payload))
                 elif kind == "ytdlp":
@@ -1055,10 +1175,19 @@ class App(ctk.CTk):
         except queue.Empty:
             pass
         except Exception:
-            # A bug in one handler must NEVER kill the pump (that would freeze the
-            # whole app). Swallow, tell the user, and keep draining next tick.
+            # A bug in one handler must NEVER kill the pump OR strand the user with
+            # no way forward. Swallow, then recover to an actionable state.
             try:
-                self._status("Something went wrong updating the screen. Please try again.")
+                self._status("Something went wrong. Please try that again.")
+                if self._searching:
+                    self._lock_search(False)
+                elif self.flow_state == "downloading":
+                    pass  # the worker will still post done/error to resolve it
+                elif self.info is not None and self.loaded_url:
+                    self._set_state("loaded")  # a song is loaded: let them retry/save
+                    self._validate_trim()
+                elif self.flow_state != "starting":
+                    self._set_state("empty")
             except Exception:
                 pass
         finally:
@@ -1071,32 +1200,45 @@ class App(ctk.CTk):
     # ---- state updates ---------------------------------------------------- #
 
     def _on_info(self, url: str, info: VideoInfo) -> None:
+        # Essential state first, so a cosmetic failure below can never leave the
+        # screen stuck in "loading" (the cause of the old "something went wrong,
+        # no way to retry" bug). Everything after this is wrapped + best-effort.
         player.stop()
-        self._clear_cache()  # a different video — drop any previously cached audio
+        self._cancel_playhead()
+        self._prefetch_url = None
+        self._pending_preview = None
+        self._clear_cache()
         self.info = info
         self.loaded_url = url
-        self.title_var.set(info.title)
-        meta = f"Length: {fmt_time(info.duration)}" if info.duration > 0 else "Length: unknown"
-        if info.source:
-            src = "YouTube" if info.source.startswith("youtube") else info.source.title()
-            meta += f"   •   from {src}"
-            if not info.source.startswith("youtube"):
-                meta += " (experimental)"
-        self.meta_var.set(meta)
-        self.start_var.set("0:00")
-        self.end_var.set(fmt_time(info.duration) if info.duration > 0 else "")
-        self.skipfirst_var.set("0")
-        self.skiplast_var.set("0")
         self._preview_img = None
-        self.thumb_lbl.configure(image=None, text="♪")
-        self._bar_set(0)
         self._trim_ok = True
         self.trim_hint_var.set("")
-        self._set_state("loaded")
-        self._validate_trim()
-        self._status(f"✓ Loaded: {info.title}")
+        try:
+            self.title_var.set(info.title)
+            meta = f"Length: {fmt_time(info.duration)}" if info.duration > 0 else "Length: unknown"
+            if info.source:
+                src = "YouTube" if info.source.startswith("youtube") else info.source.title()
+                meta += f"   •   from {src}"
+                if not info.source.startswith("youtube"):
+                    meta += " (experimental)"
+            self.meta_var.set(meta)
+            self.start_var.set("0:00")
+            self.end_var.set(fmt_time(info.duration) if info.duration > 0 else "")
+            self.thumb_lbl.configure(image=None, text="♪", cursor="hand2")
+            self.timeline.set_duration(info.duration)
+            self._bar_set(0)
+        except Exception:
+            pass
+        self._set_state("loaded")    # ALWAYS reached -> screen is usable
+        try:
+            self._validate_trim()
+        except Exception:
+            pass
+        self._status(f"✓ Loaded: {info.title}"[:140])
+        # Fetch the cover preview, and prefetch the audio so preview/save are instant.
         if info.thumbnail:
             threading.Thread(target=self._fetch_preview, args=(url, info.thumbnail), daemon=True).start()
+        self._ensure_audio(url)
 
     def _on_results(self, query: str, results: list) -> None:
         self._lock_search(False)
@@ -1110,11 +1252,11 @@ class App(ctk.CTk):
         self._bar_set(0)
         self._set_state("empty")
         self._status("That link is a playlist.")
-        if messagebox.askyesno(
-            APP_TITLE,
-            "That link is a playlist of songs.\n\n"
-            "Open “Download several” to grab them all?"):
-            self._open_bulk_with_playlist(url)
+        self._ask_choice(
+            "That link is a playlist of songs.\n\nImport every song into "
+            "“Download several”?",
+            [("Import whole playlist", "playlist"), ("Cancel", "cancel")],
+            lambda v: self._open_bulk_with_playlist(url) if v == "playlist" else None)
 
     def _on_done(self, path: Path) -> None:
         self._bar_set(1.0)
@@ -1148,7 +1290,8 @@ class App(ctk.CTk):
 
     def _on_update_available(self, info: dict) -> None:
         if (self.flow_state in ("loading", "downloading", "starting") or self._searching
-                or self._preview_busy or self._chooser is not None or self._bulk is not None):
+                or self._prefetch_url is not None or self._chooser is not None
+                or self._bulk is not None or self._choice is not None):
             return  # don't interrupt an in-progress job or yank away an open overlay
         if not messagebox.askyesno(
             APP_TITLE,
@@ -1180,6 +1323,10 @@ class App(ctk.CTk):
             return
         self._closing = True
         try:
+            self._cancel_playhead()
+        except Exception:
+            pass
+        try:
             player.stop()
         except Exception:
             pass
@@ -1189,6 +1336,37 @@ class App(ctk.CTk):
         except Exception:
             pass
         super().destroy()
+
+
+# --------------------------------------------------------------------------- #
+# Custom choice dialog (overlay, so we can relabel the buttons)
+# --------------------------------------------------------------------------- #
+
+class ChoiceOverlay(ctk.CTkFrame):
+    """A modal-looking in-window dialog with custom button labels."""
+
+    def __init__(self, app, message: str, buttons, on_pick) -> None:
+        super().__init__(app, fg_color=WINDOW_BG, corner_radius=0)
+        self.on_pick = on_pick
+        card = ctk.CTkFrame(self, corner_radius=14, fg_color=CARD_BG,
+                            border_width=1, border_color=CARD_BORDER)
+        card.place(relx=0.5, rely=0.45, anchor="center")
+        ctk.CTkLabel(card, text=APP_TITLE, text_color=PINK,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(padx=26, pady=(20, 2))
+        ctk.CTkLabel(card, text=message, justify="left", wraplength=420,
+                     font=ctk.CTkFont(size=14)).pack(padx=26, pady=(6, 16))
+        btnrow = ctk.CTkFrame(card, fg_color="transparent")
+        btnrow.pack(padx=26, pady=(0, 20))
+        for i, (label, value) in enumerate(buttons):
+            primary = (i == 0)
+            b = ctk.CTkButton(
+                btnrow, text=label, height=38, width=150,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                fg_color=PINK if primary else SECONDARY,
+                hover_color=PINK_HOVER if primary else SECONDARY_H,
+                text_color="white" if primary else TITLE_ON,
+                command=lambda v=value: self.on_pick(v))
+            b.grid(row=0, column=i, padx=6)
 
 
 # --------------------------------------------------------------------------- #

@@ -224,8 +224,12 @@ def _spawn_replacer(current: Path, new: Path) -> None:
         "ping -n 2 127.0.0.1 >NUL\r\n"
         "goto retry\r\n"
         ":launch\r\n"
-        # Clear _MEIPASS2 so the relaunched one-file exe extracts fresh instead
-        # of inheriting our (now-deleted) temp dir -> "Failed to load Python DLL".
+        # Clear EVERY PyInstaller one-file env var before relaunching. A one-file exe
+        # that inherits these thinks it's a child re-exec and reuses our (now-deleted)
+        # temp dir -> "Failed to load Python DLL". PyInstaller 6.x renamed _MEIPASS2 to
+        # _PYI_* (e.g. _PYI_APPLICATION_HOME_DIR / _PYI_PARENT_PROCESS_LEVEL), so we wipe
+        # the whole _PYI* family plus the legacy _MEIPASS2 to be version-proof.
+        "for /f \"delims==\" %%v in ('set _PYI 2^>nul') do set \"%%v=\"\r\n"
         'set "_MEIPASS2="\r\n'
         'start "" "%DST%"\r\n'
         'del "%~f0"\r\n'

@@ -14,6 +14,7 @@ import re
 import tempfile
 import threading
 import tkinter as tk
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -98,7 +99,18 @@ class BulkRow:
             self.frame, text=_short(self.url), text_color=MUTED,
             font=ctk.CTkFont(size=11), anchor="w", justify="left")
         self.info_lbl.grid(row=1, column=1, columnspan=3, sticky="w", padx=6, pady=(2, 10))
+        # The info line shows the link — make it clickable to open the source.
+        if str(self.url).startswith("http"):
+            self.info_lbl.configure(cursor="hand2")
+            self.info_lbl.bind("<Button-1>", lambda _e: self._open_source())
         self.refresh()
+
+    def _open_source(self) -> None:
+        try:
+            if str(self.url).startswith("http"):
+                webbrowser.open(self.url)
+        except Exception:
+            pass
 
     # --- state ---
     def set_info(self, info) -> None:
@@ -194,7 +206,7 @@ class BulkView(ctk.CTkFrame):
         rowin.grid_columnconfigure(0, weight=1)
         self.url_var = tk.StringVar()
         self.url_entry = ctk.CTkEntry(rowin, textvariable=self.url_var, height=40,
-                                      placeholder_text="Paste a song link — or a whole playlist link")
+                                      placeholder_text="Paste a song link, or a whole playlist link")
         self.url_entry.grid(row=0, column=0, sticky="ew")
         self.url_entry.bind("<Return>", lambda _e: self._on_add())
         self.add_btn = ctk.CTkButton(rowin, text="+  Add", width=90, height=40,
@@ -371,8 +383,8 @@ class BulkView(ctk.CTkFrame):
         if not todo:
             return
         self._set_busy(True)
-        self._bar_indeterminate()
-        self.status_var.set("Reading song details…")
+        self._bar_set(0)  # determinate: fill as each song's info comes in
+        self.status_var.set("Reading song details...")
         threading.Thread(target=self._fetch_worker, args=(todo,), daemon=True).start()
 
     def _fetch_worker(self, rows) -> None:
@@ -390,7 +402,8 @@ class BulkView(ctk.CTkFrame):
             futs = [ex.submit(one, r) for r in rows]
             for _ in as_completed(futs):
                 done += 1
-                self.q.put(("status", f"Reading {done} of {n}…"))
+                self.q.put(("progress", done / n))  # real overall progress
+                self.q.put(("status", f"Reading {done} of {n}..."))
         self.q.put(("fetch_done", None))
 
     # ---- download all ----
@@ -439,26 +452,29 @@ class BulkView(ctk.CTkFrame):
         n, ok, fail = len(jobs), 0, 0
         for i, job in enumerate(jobs, 1):
             row = job["row"]
+            # Overall batch progress: songs already finished, plus this song's own
+            # fraction (download = first 85%, convert = last 15% of one song).
+            def overall(frac, _i=i):
+                return ((_i - 1) + max(0.0, min(1.0, frac))) / n
             try:
                 self.q.put(("row_status", (row, "downloading")))
                 self.q.put(("status", f"Downloading {i} of {n}: {job['title']}"))
-                self.q.put(("progress", 0.0))
+                self.q.put(("progress", overall(0.0)))
                 with tempfile.TemporaryDirectory(prefix="aubreybulk_") as tmp:
                     audio, thumb = download_audio(
                         self.app.ytdlp, job["url"], Path(tmp), deno=self.app.deno,
-                        on_progress=lambda p: self.q.put(("progress", p / 100.0)))
+                        on_progress=lambda p: self.q.put(("progress", overall(0.85 * (p / 100.0)))))
                     self.q.put(("row_status", (row, "converting")))
                     self.q.put(("status", f"Converting {i} of {n}: {job['title']}"))
+                    self.q.put(("progress", overall(0.85)))
                     base_end = job["end"] if job["end"] is not None else job["duration"]
-                    # Unknown length -> let the bar go indeterminate instead of
-                    # pinning a misleading percentage (mirror single-song mode).
                     clip_total = (max(0.1, base_end - job["start"])
                                   if base_end and base_end > job["start"] else None)
-                    self.q.put(("busy_bar", None) if clip_total is None else ("progress", 0.0))
                     dest = _unique(folder / f"{safe_filename(job['title'])}.mp3")
                     make_mp3(audio, dest, title=job["title"], start=job["start"], end=job["end"],
                              cover=thumb, total_seconds=clip_total,
-                             on_progress=lambda f: self.q.put(("progress", f)))
+                             on_progress=lambda f: self.q.put(("progress", overall(0.85 + 0.15 * f))))
+                self.q.put(("progress", overall(1.0)))
                 self.q.put(("row_status", (row, "done")))
                 ok += 1
             except DownloadError as e:
