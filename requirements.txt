@@ -3,3 +3,4 @@
 #   - yt-dlp is downloaded/auto-updated at runtime (see app/updater.py)
 customtkinter>=5.2.2
 pillow>=10.0.0          # in-app header logo (CTkImage)
+certifi>=2024.2.2       # CA bundle for our HTTPS downloads (Windows OpenSSL can't auto-fetch roots)

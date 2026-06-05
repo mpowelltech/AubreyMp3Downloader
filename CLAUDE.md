@@ -57,6 +57,17 @@ touch Tk widgets from a worker thread.**
   PyInstaller cannot cross-compile from macOS.
 - **Packaging hygiene:** `--onefile`, `console=False`, **UPX off** (UPX worsens
   antivirus false positives). Unsigned exe ⇒ one-time SmartScreen prompt.
+- **Robust first launch:** a PyInstaller `Splash` (assets/splash.png) covers the
+  one-file unpack; our HTTPS downloads verify against **certifi** (Windows OpenSSL
+  won't fetch missing roots on demand, which caused CERTIFICATE_VERIFY_FAILED on
+  fresh PCs); ffmpeg presence is verified at startup; and any setup failure drops
+  to a locked `"failed"` state with a Retry prompt — the app refuses to proceed
+  without its tools (`_verify_ffmpeg`, `_on_setup_error`, `_start_engine`).
+- **App self-update:** on startup the frozen Windows exe compares the GitHub
+  `releases/latest` tag to `__version__`; if newer it prompts, downloads the new
+  exe beside the current one, and a detached `apply_update.bat` waits for this
+  process to exit, swaps the exe in place, and relaunches
+  (`updater.check_for_app_update` / `download_and_relaunch`).
 
 ## Bulk mode (app/bulk.py)
 

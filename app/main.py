@@ -28,10 +28,12 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from . import __version__
 from .audio import make_mp3
 from .downloader import DownloadError, VideoInfo, download_audio, fetch_info
-from .paths import resource_path
-from .updater import ensure_deno, ensure_ytdlp, update_in_background
+from .paths import ffmpeg_binary, resource_path
+from .updater import (check_for_app_update, download_and_relaunch, ensure_deno,
+                      ensure_ytdlp, update_in_background)
 
 APP_TITLE = "Aubrey's YT-MP3 Downloader"
 
@@ -58,6 +60,7 @@ _BADGES = {
     "loaded":      {1: "done",    2: "active",  3: "active"},
     "downloading": {1: "done",    2: "active",  3: "active"},
     "done":        {1: "done",    2: "done",    3: "done"},
+    "failed":      {1: "pending", 2: "pending", 3: "pending"},
 }
 
 
@@ -92,6 +95,16 @@ def safe_filename(name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*\n\r\t]', " ", name or "").strip()
     name = re.sub(r"\s+", " ", name)
     return (name or "audio")[:120]
+
+
+def _verify_ffmpeg() -> None:
+    """Raise if ffmpeg isn't available (bundled in frozen builds, on PATH in dev)."""
+    import os
+    import shutil
+    ff = ffmpeg_binary()
+    ok = os.path.exists(ff) if os.path.isabs(ff) else shutil.which(ff) is not None
+    if not ok:
+        raise RuntimeError("ffmpeg is missing from the app. Please reinstall the app.")
 
 
 def open_folder(folder: Path) -> None:
@@ -137,11 +150,9 @@ class App(ctk.CTk):
         self.q: "queue.Queue[tuple[str, object]]" = queue.Queue()
 
         self._build_ui()
-        self._set_state("starting")
-        self._bar_indeterminate()  # animate while the engine sets up on first run
         self.after(0, self._close_splash)   # dismiss the PyInstaller splash now the window is up
         self.after(100, self._poll)
-        threading.Thread(target=self._init_engine, daemon=True).start()
+        self._start_engine()
 
     # ---- UI construction ------------------------------------------------- #
 
@@ -392,8 +403,19 @@ class App(ctk.CTk):
 
     # ---- background: resolve yt-dlp + deno ------------------------------- #
 
+    def _start_engine(self) -> None:
+        """Resolve yt-dlp/deno (downloading on first run) + verify ffmpeg.
+
+        Called at launch and again by the Retry button after a setup failure.
+        """
+        self._set_state("starting")
+        self._status("Starting up…")
+        self._bar_indeterminate()
+        threading.Thread(target=self._init_engine, daemon=True).start()
+
     def _init_engine(self) -> None:
         try:
+            _verify_ffmpeg()  # bundled exe (frozen) / on PATH (dev) — fail loudly if absent
             cmd = ensure_ytdlp(status=lambda m: self.q.put(("status", m)))
             self.q.put(("ytdlp", cmd))
             update_in_background(cmd)
@@ -401,9 +423,11 @@ class App(ctk.CTk):
             self.q.put(("deno", deno))
             self.q.put(("ready", None))
             self.q.put(("status", "Ready. Paste a YouTube link above."))
+            info = check_for_app_update(__version__)  # no-op unless frozen Windows + newer release
+            if info:
+                self.q.put(("update_available", info))
         except Exception as e:
-            self.q.put(("error", f"Couldn't finish setting up.\n\n{e}\n\n"
-                                 "Please check your internet connection and reopen the app."))
+            self.q.put(("setup_error", str(e)))
 
     # ---- button handlers -------------------------------------------------- #
 
@@ -600,6 +624,13 @@ class App(ctk.CTk):
                         self._set_state("empty")
                 elif kind == "done":
                     self._on_done(Path(str(payload)))
+                elif kind == "setup_error":
+                    self._on_setup_error(str(payload))
+                elif kind == "update_available":
+                    self._on_update_available(payload)  # type: ignore[arg-type]
+                elif kind == "quit_for_update":
+                    self.destroy()
+                    return
                 elif kind == "error":
                     self._on_error(str(payload))
         except queue.Empty:
@@ -632,6 +663,43 @@ class App(ctk.CTk):
         self._set_state("empty" if self.flow_state in ("loading", "starting") else "loaded")
         self._status("")
         messagebox.showerror(APP_TITLE, message)
+
+    def _on_setup_error(self, detail: str) -> None:
+        # Setup failed (no internet / download blocked / ffmpeg missing). Lock the
+        # whole app so nothing can be attempted, and offer to retry.
+        self._bar_set(0)
+        self.ready = False
+        self._set_state("failed")
+        self._status("Setup failed. Connect to the internet, then click Retry.")
+        msg = ("The app couldn't get the tools it needs to run (the YouTube downloader "
+               "and helper), or a required file is missing.\n\n"
+               f"Details: {detail}\n\n"
+               "Make sure you're connected to the internet, then click Retry.")
+        if messagebox.askretrycancel(APP_TITLE, msg):
+            self._start_engine()
+
+    def _on_update_available(self, info: dict) -> None:
+        if self.flow_state in ("loading", "downloading", "starting"):
+            return  # don't interrupt an in-progress job
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"A newer version ({info.get('tag')}) is available.\n"
+            f"You have v{__version__}.\n\n"
+            "Update now? The app will download it and restart."):
+            return
+        self._set_state("starting")
+        self._status("Downloading update…")
+        self._bar_indeterminate()
+        threading.Thread(target=self._do_update, args=(info,), daemon=True).start()
+
+    def _do_update(self, info: dict) -> None:
+        try:
+            download_and_relaunch(info["url"], status=lambda m: self.q.put(("status", m)))
+            self.q.put(("status", "Update downloaded. Restarting…"))
+            self.q.put(("quit_for_update", None))
+        except Exception as e:
+            self.q.put(("error", f"Couldn't install the update.\n\n{e}\n\n"
+                                 "You can download the latest version from mpowell.tech/tools."))
 
     def _status(self, text: str) -> None:
         self.status_var.set(text)
