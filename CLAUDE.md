@@ -23,7 +23,7 @@ app/
   downloader.py        # shells out to yt-dlp: fetch_info() + download_audio()
   audio.py             # shells out to ffmpeg: make_mp3() — trim, encode, tag, cover
   main.py              # single-song GUI; state machine; workers -> queue -> Tk loop
-  bulk.py              # "Several songs" window: add a list, fetch all, download all
+  bulk.py              # "Download multiple" in-window overlay: add a list, fetch all, download all
 scripts/smoke.py       # headless pipeline test (no GUI)
 scripts/run_mac.command # run from source on macOS (no exe build) for quick UI testing
 AubreyMp3.spec         # PyInstaller --onefile spec
@@ -60,9 +60,14 @@ touch Tk widgets from a worker thread.**
 
 ## Bulk mode (app/bulk.py)
 
-`BulkWindow` (a CTkToplevel opened from the single screen's "Several songs"
-button; the single window withdraws while it's open). Reuses the same engine
-(`app.ytdlp` / `app.deno`) and the same per-song pipeline. Flow: add links (one
+`BulkView` is a `CTkFrame` (NOT a Toplevel) opened from the single screen's
+"Download multiple" button. `App._on_several` enlarges the window, creates the
+frame, and `place(relwidth=1, relheight=1)` + `tkraise()` overlays it over the
+single screen; `App._close_bulk` destroys it and restores the geometry. This
+single-window approach avoids the flaky macOS behaviour of withdrawing the root
+and opening a CTkToplevel (which often wouldn't come forward). `BulkView._poll`
+stops rescheduling once the frame is destroyed (`winfo_exists`). Reuses the same
+engine (`app.ytdlp` / `app.deno`) and the same per-song pipeline. Flow: add links (one
 `BulkRow` each) → "Get info for all" (ThreadPoolExecutor, 3 workers, metadata
 only) → edit title/Start/End per row → "Download all" (sequential; pick one
 folder; per-row status + overall progress). Same gating philosophy: actions

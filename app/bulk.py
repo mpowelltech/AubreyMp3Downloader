@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import queue
 import re
-import sys
 import tempfile
 import threading
 import tkinter as tk
@@ -26,7 +25,6 @@ from .downloader import DownloadError, download_audio, fetch_info
 from .main import (APP_TITLE, CARD_BG, DISABLED_BG, DISABLED_TX, DONE, MUTED,
                    PINK, PINK_HOVER, SECONDARY, SECONDARY_H, TITLE_ON, WINDOW_BG,
                    fmt_time, open_folder, parse_time, safe_filename)
-from .paths import resource_path
 
 ERR = ("#C0392B", "#E57373")
 DEL_HOVER = ("#E8A6A6", "#7E3A3A")
@@ -144,31 +142,25 @@ class BulkRow:
         self.info_lbl.configure(text=txt, text_color=col)
 
 
-class BulkWindow(ctk.CTkToplevel):
+class BulkView(ctk.CTkFrame):
+    """Bulk UI as a full-window overlay frame (single window, no Toplevel).
+
+    Lives inside the main window and is placed over the single-song screen;
+    closing it just destroys the frame and the single screen reappears. Avoids
+    the flaky macOS behaviour of withdrawing the root + opening a CTkToplevel.
+    """
+
     def __init__(self, app) -> None:
-        super().__init__(app)
-        self.app = app  # provides .ytdlp, .deno, .ready
+        super().__init__(app, fg_color=WINDOW_BG, corner_radius=0)
+        self.app = app  # provides .ytdlp, .deno, .ready and ._close_bulk()
         self.rows: list[BulkRow] = []
         self.busy = False
         self._indet = False
+        self._alive = True
         self.q: "queue.Queue[tuple[str, object]]" = queue.Queue()
 
-        self.title("Bulk download")
-        self.geometry("800x720")
-        self.minsize(740, 640)
-        self.configure(fg_color=WINDOW_BG)
-        # customtkinter resets a Toplevel's icon ~200ms after creation, so set
-        # it now and again on a short delay.
-        self._set_icon()
-        self.after(250, self._set_icon)
-        self.after(600, self._set_icon)
-
         self._build_ui()
-        self.protocol("WM_DELETE_WINDOW", self._close)
         self.after(100, self._poll)
-        self.transient(app)
-        self.lift()
-        self.after(120, self.focus)
         self._refresh_actions()
 
     # ---- UI ----
@@ -238,19 +230,6 @@ class BulkWindow(ctk.CTkToplevel):
         self.status_var = tk.StringVar(value="Add some YouTube links to get started.")
         ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", justify="left",
                      wraplength=740, text_color=MUTED).grid(row=6, column=0, sticky="ew", padx=18, pady=(0, 14))
-
-    def _set_icon(self) -> None:
-        try:
-            ico = resource_path("assets/icon.ico")
-            if sys.platform == "win32" and ico.exists():
-                self.iconbitmap(str(ico))
-            else:
-                png = resource_path("assets/icon.png")
-                if png.exists():
-                    self._iconimg = tk.PhotoImage(file=str(png))
-                    self.iconphoto(False, self._iconimg)
-        except Exception:
-            pass
 
     # ---- progress bar helpers ----
     def _bar_indeterminate(self) -> None:
@@ -428,6 +407,8 @@ class BulkWindow(ctk.CTkToplevel):
 
     # ---- queue pump ----
     def _poll(self) -> None:
+        if not self._alive or not self.winfo_exists():
+            return  # frame was closed; stop rescheduling
         try:
             while True:
                 kind, payload = self.q.get_nowait()
@@ -472,11 +453,7 @@ class BulkWindow(ctk.CTkToplevel):
 
     # ---- close / back to single ----
     def _close(self) -> None:
-        if self.busy and not messagebox.askyesno(APP_TITLE, "A job is still running. Close anyway?"):
+        if self.busy and not messagebox.askyesno(APP_TITLE, "A job is still running. Leave anyway?"):
             return
-        try:
-            self.app.deiconify()
-            self.app.lift()
-        except Exception:
-            pass
-        self.destroy()
+        self._alive = False
+        self.app._close_bulk()  # the App destroys this frame + restores the single screen

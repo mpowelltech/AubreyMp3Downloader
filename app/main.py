@@ -130,6 +130,8 @@ class App(ctk.CTk):
         self.loaded_url: str | None = None
         self._indet = False
         self._syncing = False  # guards the Start/End <-> Skip first/last mirror
+        self._bulk = None      # the bulk overlay frame, when open
+        self._saved_geometry = ""
         self._badges: dict[int, ctk.CTkLabel] = {}
         self._titles: dict[int, ctk.CTkLabel] = {}
         self.q: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -419,15 +421,30 @@ class App(ctk.CTk):
         self.url_entry.focus_set()
 
     def _on_several(self) -> None:
-        if not self.ready or self.flow_state in ("starting", "loading", "downloading"):
+        if not self.ready or self.flow_state in ("starting", "loading", "downloading") or self._bulk is not None:
             return
-        from .bulk import BulkWindow  # lazy import avoids a circular import at startup
+        from .bulk import BulkView  # lazy import avoids a circular import at startup
         try:
-            self.withdraw()
-            BulkWindow(self)
+            self._saved_geometry = self.geometry()
+            self.minsize(780, 680)
+            self.geometry("860x760")
+            self._bulk = BulkView(self)
+            self._bulk.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self._bulk.tkraise()  # cover the single-song screen
         except Exception as e:
-            self.deiconify()
+            self._close_bulk()
             messagebox.showerror(APP_TITLE, f"Couldn't open bulk mode.\n\n{e}")
+
+    def _close_bulk(self) -> None:
+        """Destroy the bulk overlay and bring the single-song screen back."""
+        if self._bulk is not None:
+            self._bulk.destroy()
+            self._bulk = None
+        self.minsize(640, 680)
+        try:
+            self.geometry(self._saved_geometry or "660x680")
+        except Exception:
+            self.geometry("660x680")
 
     def _sync_set(self, var, value) -> None:
         """Set one trim var without retriggering the opposite mirror handler."""
