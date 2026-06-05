@@ -37,6 +37,7 @@ from .downloader import (DownloadError, VideoInfo, download_audio, fetch_info,
                          has_playlist, has_single_video, looks_like_url, search)
 from .media import fetch_image
 from .paths import ffmpeg_binary, resource_path
+from .paths import cache_dir
 from .player import Player
 from .timeline import TrimTimeline
 from .updater import (check_for_app_update, download_and_relaunch, ensure_deno,
@@ -305,32 +306,43 @@ class App(ctk.CTk):
             text_color=MUTED, font=ctk.CTkFont(size=11, slant="italic"),
             wraplength=720, justify="left").grid(row=3, column=0, sticky="w", pady=(2, 0))
 
-        # ===== Section 2: check the song (title on one line, next to the picture) =====
+        # ===== Section 2: check the song (title on one full-width line) =====
         c2, b2 = self._acc_section(2, "Check the song")
         c2.grid(row=2, column=0, sticky="ew", padx=PADX, pady=4)
-        b2.grid_columnconfigure(1, weight=1)
+        b2.grid_columnconfigure(0, weight=1)
+        # pack (not grid weights) guarantees the title fills ALL space right of the
+        # picture — grid column-width quirks were leaving the title boxed in.
+        toprow = ctk.CTkFrame(b2, fg_color="transparent")
+        toprow.grid(row=0, column=0, sticky="ew")
         self.thumb_lbl = ctk.CTkLabel(
-            b2, text="♪", width=72, height=72, corner_radius=10,
+            toprow, text="♪", width=72, height=72, corner_radius=10,
             fg_color=THUMB_BG, text_color=MUTED, font=ctk.CTkFont(size=30))
-        self.thumb_lbl.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 12))
+        self.thumb_lbl.pack(side="left", padx=(0, 12))
         self.thumb_lbl.bind("<Button-1>", lambda _e: self._open_source())
+        info_col = ctk.CTkFrame(toprow, fg_color="transparent")
+        info_col.pack(side="left", fill="both", expand=True)
         self.title_var = tk.StringVar()
-        self.title_entry = ctk.CTkEntry(b2, textvariable=self.title_var, height=38,
+        self.title_entry = ctk.CTkEntry(info_col, textvariable=self.title_var, height=38,
                                         font=ctk.CTkFont(size=14),
                                         placeholder_text="(the song title loads here)")
-        self.title_entry.grid(row=0, column=1, sticky="ew")
+        self.title_entry.pack(fill="x")
         self.meta_var = tk.StringVar(value="Length: ...")
-        ctk.CTkLabel(b2, textvariable=self.meta_var, text_color=MUTED, anchor="w",
-                     font=ctk.CTkFont(size=12)).grid(row=1, column=1, sticky="nw", pady=(4, 0))
+        ctk.CTkLabel(info_col, textvariable=self.meta_var, text_color=MUTED, anchor="w",
+                     font=ctk.CTkFont(size=12)).pack(fill="x", pady=(4, 0))
+        self.src_link = ctk.CTkLabel(info_col, text="↗  Open the original video",
+                                     text_color=PINK, anchor="w", cursor="hand2",
+                                     font=ctk.CTkFont(size=12, underline=True))
+        self.src_link.pack(anchor="w", pady=(4, 0))
+        self.src_link.bind("<Button-1>", lambda _e: self._open_source())
         ctk.CTkLabel(
             b2, text="This is the track name shown in the Yoto app. Edit it if you like, "
                      "then trim it below.",
             text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=720, justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
         ctk.CTkButton(b2, text="Next: Trim  ▾", width=130, height=30, fg_color=SECONDARY,
                       hover_color=SECONDARY_H, text_color=TITLE_ON,
                       command=lambda: self._acc_click(3)).grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            row=2, column=0, sticky="w", pady=(10, 0))
 
         # ===== Section 3: trim + mini player =====
         c3, b3 = self._acc_section(3, "Trim & preview")
@@ -382,6 +394,11 @@ class App(ctk.CTk):
         ctk.CTkLabel(b3, textvariable=self.trim_hint_var, text_color=ERR_TX,
                      font=ctk.CTkFont(size=12, weight="bold"), wraplength=720,
                      justify="left").grid(row=4, column=0, sticky="w", pady=(2, 0))
+        self.src_link2 = ctk.CTkLabel(b3, text="↗  Open the original video",
+                                      text_color=PINK, anchor="w", cursor="hand2",
+                                      font=ctk.CTkFont(size=12, underline=True))
+        self.src_link2.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self.src_link2.bind("<Button-1>", lambda _e: self._open_source())
 
         # --- Download (primary action) ---
         self.download_btn = ctk.CTkButton(
@@ -838,8 +855,7 @@ class App(ctk.CTk):
         self._trim_ok = True
         self.trim_hint_var.set("")
         self.pos_var.set("")
-        self._preview_img = None
-        self.thumb_lbl.configure(image=None, text="♪", cursor="")
+        self._reset_thumb("")
         self.url_var.set("")
         self.title_var.set("")
         self.meta_var.set("Length: ...")
@@ -1123,6 +1139,20 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
+    def _reset_thumb(self, cursor: str = "") -> None:
+        """Clear the thumbnail back to the ♪ placeholder, safely.
+
+        Use image="" (NOT None): Tk skips a None option so it wouldn't clear the
+        image, and configuring image=None after the CTkImage was dereferenced
+        raised 'image "pyimageN" doesn't exist' on Windows — which aborted Start
+        over. image="" clears reliably (only a harmless CTk console warning).
+        """
+        try:
+            self.thumb_lbl.configure(image="", text="♪", cursor=cursor)
+        except Exception:
+            pass
+        self._preview_img = None
+
     def _apply_thumb(self, url: str, pil_img) -> None:
         if url != self.loaded_url:
             return  # the user moved on before the image arrived
@@ -1239,10 +1269,10 @@ class App(ctk.CTk):
             pass
         self.info = info
         self.loaded_url = url
-        self._preview_img = None
         self._trim_ok = True
         self.trim_hint_var.set("")
         self.pos_var.set("")
+        self._reset_thumb("hand2")
         try:
             self.title_var.set(info.title)
             meta = f"Length: {fmt_time(info.duration)}" if info.duration > 0 else "Length: unknown"
@@ -1254,7 +1284,6 @@ class App(ctk.CTk):
             self.meta_var.set(meta)
             self.start_var.set("0:00")
             self.end_var.set(fmt_time(info.duration) if info.duration > 0 else "")
-            self.thumb_lbl.configure(image=None, text="♪", cursor="hand2")
             self.timeline.set_duration(info.duration)
             self._bar_set(0)
         except Exception:
@@ -1349,6 +1378,26 @@ class App(ctk.CTk):
 
     def _status(self, text: str) -> None:
         self.status_var.set(text)
+
+    def report_callback_exception(self, exc, val, tb) -> None:
+        """Tk calls this for ANY unhandled exception in a callback (button/trace/
+        after). In a windowed exe the default just prints to a stderr nobody sees,
+        so a crashing handler looks like 'the button does nothing'. Log it to the
+        per-user cache and tell the user, never crash here."""
+        import traceback
+        text = "".join(traceback.format_exception(exc, val, tb))
+        try:
+            with open(cache_dir() / "error.log", "a", encoding="utf-8") as f:
+                f.write(text + "\n" + ("-" * 60) + "\n")
+        except Exception:
+            pass
+        try:
+            messagebox.showerror(
+                APP_TITLE,
+                "Sorry, something went wrong:\n\n" + (str(val) or type(val).__name__)
+                + "\n\nTry again, or click Start over / reopen the app.")
+        except Exception:
+            pass
 
     def destroy(self) -> None:
         # Stop any preview and clean up the temp audio before the window closes.

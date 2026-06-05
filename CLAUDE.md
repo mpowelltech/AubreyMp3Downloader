@@ -142,8 +142,15 @@ touch Tk widgets from a worker thread.**
   the app/download are unaffected. `_cache_url` ties cached audio to its video;
   `_clear_cache` (Start over / new load) and `destroy()` remove the temp subdirs;
   each prefetch gets its OWN subdir so a still-finishing previous download can't
-  collide on the `audio.<ext>` name. miniaudio is bundled via `collect_all` in the
-  spec (one cffi `.pyd`).
+  collide on the `audio.<ext>` name. **Bundling gotcha:** `miniaudio` is a single
+  .py module and its compiled half is a SEPARATE top-level extension `_miniaudio`
+  (`_miniaudio.pyd`), so `collect_all("miniaudio")` misses it and the frozen exe
+  then can't import miniaudio ("preview isn't available"). The spec adds
+  `_miniaudio` to hiddenimports — keep that.
+- **Crash visibility:** `App.report_callback_exception` is overridden so any
+  unhandled exception in a Tk callback (button/trace/after) is written to
+  `cache_dir()/error.log` AND shown to the user, instead of vanishing to a stderr
+  nobody sees in a windowed exe.
 - **Unbreakable hardening.** `_poll` (both screens) survives any handler
   exception and always reschedules in `finally` — a single UI bug can never freeze
   the app. `parse_time` rejects `inf`/`nan`. `_validate_trim` blocks Download on

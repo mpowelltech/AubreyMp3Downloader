@@ -21,14 +21,22 @@ except NameError:
 # customtkinter ships theme assets + needs a few hidden imports.
 ctk_datas, ctk_binaries, ctk_hidden = collect_all("customtkinter")
 
-# miniaudio is the preview player's audio backend: a single cffi extension
-# (_miniaudio) with a statically-linked C lib. collect_all pulls in the .pyd so
-# the frozen exe can import it. It's imported lazily + guarded in player.py, so
-# even if this somehow misses, the app still launches (preview just degrades).
+# miniaudio is the preview player's audio backend. IMPORTANT: `miniaudio` is a
+# single .py module, and the compiled part is a SEPARATE top-level cffi extension
+# `_miniaudio` (e.g. _miniaudio.pyd) — NOT inside a `miniaudio` package. So
+# collect_all("miniaudio") does NOT pull in _miniaudio, and the frozen exe then
+# fails to import miniaudio ("preview isn't available"). We must add _miniaudio
+# as a hidden import (PyInstaller then bundles the .pyd) and collect its lib.
 try:
     ma_datas, ma_binaries, ma_hidden = collect_all("miniaudio")
 except Exception:
     ma_datas, ma_binaries, ma_hidden = [], [], []
+ma_hidden = list(ma_hidden) + ["miniaudio", "_miniaudio"]
+try:
+    from PyInstaller.utils.hooks import collect_dynamic_libs
+    ma_binaries = list(ma_binaries) + collect_dynamic_libs("_miniaudio")
+except Exception:
+    pass
 
 binaries = list(ctk_binaries) + list(ma_binaries)
 _ffmpeg = os.path.join(HERE, "build", "ffmpeg.exe")
