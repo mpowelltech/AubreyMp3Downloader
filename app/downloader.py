@@ -5,14 +5,13 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import proc
 from .paths import ffmpeg_location
 
-_CREATE_NO_WINDOW = 0x08000000
 _PCT = re.compile(r"(\d{1,3}(?:\.\d)?)%")
 
 # Order matters: pick the real audio file before the .jpg thumbnail.
@@ -53,10 +52,6 @@ class DownloadError(Exception):
     """A failure worded for a non-technical user."""
 
 
-def _no_window() -> dict:
-    return {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-
-
 def _engine_args(deno: Optional[str]) -> list[str]:
     """Args that let yt-dlp solve YouTube's JS 'n' challenge.
 
@@ -77,19 +72,19 @@ def fetch_info(ytdlp: str, url: str, deno: Optional[str] = None) -> VideoInfo:
     with a friendly message rather than letting the user start a doomed job.
     """
     try:
-        proc = subprocess.run(
+        cp = proc.run(
             [ytdlp, "-J", "--no-playlist", "--no-warnings",
              "--retries", "3", "--socket-timeout", "30", *_engine_args(deno), url],
-            capture_output=True, text=True, timeout=150, **_no_window(),
+            capture_output=True, text=True, timeout=150,
         )
     except subprocess.TimeoutExpired:
         raise DownloadError("Timed out reading the link. Check your internet and try again.")
     except FileNotFoundError:
         raise DownloadError("The download engine isn't available yet. Please reopen the app.")
-    if proc.returncode != 0:
-        raise DownloadError(_friendly(proc.stderr))
+    if cp.returncode != 0:
+        raise DownloadError(_friendly(cp.stderr))
     try:
-        data = json.loads(proc.stdout)
+        data = json.loads(cp.stdout)
     except json.JSONDecodeError:
         raise DownloadError("Couldn't read that link. Is it correct and complete?")
     # A playlist URL slipped through (e.g. a bare /playlist link): tell the caller
@@ -176,20 +171,20 @@ def search(ytdlp: str, query: str, deno: Optional[str] = None, n: int = 6) -> li
         return []
     n = max(1, min(n, 12))
     try:
-        proc = subprocess.run(
+        cp = proc.run(
             [ytdlp, "-J", "--flat-playlist", "--no-warnings",
              "--retries", "2", "--socket-timeout", "30", *_engine_args(deno),
              f"ytsearch{n}:{query}"],
-            capture_output=True, text=True, timeout=90, **_no_window(),
+            capture_output=True, text=True, timeout=90,
         )
     except subprocess.TimeoutExpired:
         raise DownloadError("Search timed out. Check your internet and try again.")
     except FileNotFoundError:
         raise DownloadError("The download engine isn't available yet. Please reopen the app.")
-    if proc.returncode != 0:
-        raise DownloadError(_friendly(proc.stderr))
+    if cp.returncode != 0:
+        raise DownloadError(_friendly(cp.stderr))
     try:
-        data = json.loads(proc.stdout)
+        data = json.loads(cp.stdout)
     except json.JSONDecodeError:
         raise DownloadError("Couldn't run that search. Please try again.")
     out: list = []
@@ -219,20 +214,20 @@ def fetch_playlist(ytdlp: str, url: str, deno: Optional[str] = None, limit: int 
     when it truncated.
     """
     try:
-        proc = subprocess.run(
+        cp = proc.run(
             [ytdlp, "-J", "--flat-playlist", "--no-warnings",
              "--retries", "2", "--socket-timeout", "30",
              "--playlist-end", str(limit), *_engine_args(deno), url],
-            capture_output=True, text=True, timeout=180, **_no_window(),
+            capture_output=True, text=True, timeout=180,
         )
     except subprocess.TimeoutExpired:
         raise DownloadError("Timed out reading the playlist. Check your internet and try again.")
     except FileNotFoundError:
         raise DownloadError("The download engine isn't available yet. Please reopen the app.")
-    if proc.returncode != 0:
-        raise DownloadError(_friendly(proc.stderr))
+    if cp.returncode != 0:
+        raise DownloadError(_friendly(cp.stderr))
     try:
-        data = json.loads(proc.stdout)
+        data = json.loads(cp.stdout)
     except json.JSONDecodeError:
         raise DownloadError("Couldn't read that playlist. Is the link correct?")
     raw = data.get("entries") or []
@@ -290,25 +285,12 @@ def download_audio(
     if loc:
         cmd += ["--ffmpeg-location", loc]
 
-    try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, **_no_window(),
-        )
-    except FileNotFoundError:
-        raise DownloadError("The YouTube engine isn't available yet. Please reopen the app.")
-
-    assert proc.stdout is not None
+    # proc.stream reads line-by-line AND, if `cancel` is set, kills the whole
+    # yt-dlp process tree (incl. its ffmpeg/deno children) — even mid-readline —
+    # then reaps it. So a cancel/close can never hang or leave a child running.
     tail: list[str] = []
-    # readline() (not "for line in proc.stdout") so progress streams in real time
-    # on Windows instead of being block-buffered until the process exits.
-    for raw in iter(proc.stdout.readline, ""):
-        if cancel is not None and cancel.is_set():
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-            raise DownloadError("__CANCELLED__")
+
+    def _on_line(raw: str) -> None:
         line = raw.strip()
         if line.startswith("dl:"):
             m = _PCT.search(line)
@@ -317,10 +299,15 @@ def download_audio(
         elif line:
             tail.append(line)
             del tail[:-25]  # keep only the last 25 lines for error context
-    proc.wait()
+
+    try:
+        rc = proc.stream(cmd, _on_line, cancel)
+    except FileNotFoundError:
+        raise DownloadError("The YouTube engine isn't available yet. Please reopen the app.")
+
     if cancel is not None and cancel.is_set():
         raise DownloadError("__CANCELLED__")
-    if proc.returncode != 0:
+    if rc != 0:
         raise DownloadError(_friendly("\n".join(tail)))
 
     audio = _find_one(workdir, _AUDIO_GLOBS, exclude_suffixes={".jpg", ".jpeg", ".png", ".webp"})
@@ -368,7 +355,9 @@ def _friendly(stderr: str) -> str:
     if "unsupported url" in s:
         return ("That website isn't supported. This works with YouTube and many other "
                 "video and music sites, but not every link.")
-    if "is not a valid url" in s or "unable to download webpage" in s and "http" not in s:
+    # "unable to download webpage" also fires for real http links (404s, blips), so
+    # only treat it as a bad-link hint when the text has no http in it at all.
+    if "is not a valid url" in s or ("unable to download webpage" in s and "http" not in s):
         return "That doesn't look like a complete link. Copy the whole web address and try again."
     if "no video formats" in s or "requested format is not available" in s:
         return "That link has no downloadable audio. Try a different one."

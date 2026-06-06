@@ -46,6 +46,9 @@ class Player:
         self._paused = False
         self._ended = False
         self._active = False
+        self._stream_id = 0     # bumped on every play()/stop() so a stale generator
+        #   (from a just-stopped stream whose device is still being torn down) can
+        #   never write into the NEW stream's _frames/_ended and corrupt its position
         self._avail: Optional[bool] = None
 
     # ---- capability (probed once) ----
@@ -91,6 +94,8 @@ class Player:
             dev = miniaudio.PlaybackDevice(
                 output_format=miniaudio.SampleFormat.SIGNED16, nchannels=_CH, sample_rate=_RATE)
             with self._lock:
+                self._stream_id += 1
+                sid = self._stream_id
                 self._proc = proc
                 self._dev = dev
                 self._start = start
@@ -98,7 +103,7 @@ class Player:
                 self._paused = False
                 self._ended = False
                 self._active = True
-            gen = self._stream(proc)
+            gen = self._stream(proc, sid)
             next(gen)  # miniaudio requires a primed generator before start()
             dev.start(gen)
             return True
@@ -106,11 +111,19 @@ class Player:
             self.stop()
             return False
 
-    def _stream(self, proc):
-        """miniaudio generator: pull decoded PCM from ffmpeg, yield it to the device."""
+    def _stream(self, proc, sid):
+        """miniaudio generator: pull decoded PCM from ffmpeg, yield it to the device.
+
+        ``sid`` is this stream's id; if a newer stream has started (or we've been
+        stopped) ``sid != self._stream_id`` and we bail WITHOUT touching shared
+        state — otherwise a lingering generator from an old device could keep
+        bumping _frames and wreck the new stream's reported position.
+        """
         required = yield b""
         while True:
-            if not self._active:
+            with self._lock:
+                stale = (sid != self._stream_id) or not self._active
+            if stale:
                 return
             want = int(required) * _FRAME_BYTES
             if self._paused:
@@ -122,17 +135,20 @@ class Player:
                 data = b""
             if not data:
                 with self._lock:
-                    self._ended = True
+                    if sid == self._stream_id:
+                        self._ended = True
                 required = yield array.array("h", bytes(want))
                 continue
             if len(data) % 2:
                 data = data[:-1]
             if len(data) < want:
                 with self._lock:
-                    self._ended = True
+                    if sid == self._stream_id:
+                        self._ended = True
                 data = data + bytes(want - len(data))
             with self._lock:
-                self._frames += int(required)
+                if sid == self._stream_id:
+                    self._frames += int(required)
             required = yield array.array("h", data)
 
     def pause(self) -> None:
@@ -152,6 +168,7 @@ class Player:
         NEVER freeze the Tk main thread (which is what calls stop()).
         """
         with self._lock:
+            self._stream_id += 1   # invalidate the current generator immediately
             self._active = False
             proc, dev = self._proc, self._dev
             self._proc = self._dev = None

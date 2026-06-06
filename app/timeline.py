@@ -48,7 +48,6 @@ class TrimTimeline(ctk.CTkFrame):
         self.start = 0.0
         self.end = 0.0
         self.peaks: Optional[list] = None
-        self._play: Optional[tuple] = None     # (a, b) slice being previewed
         self._playhead: Optional[float] = None
         self._enabled = False
         self._locked = False                   # True outside the loaded/done state
@@ -69,7 +68,6 @@ class TrimTimeline(ctk.CTkFrame):
             self.start = 0.0
             self.end = self.duration
         self.peaks = None
-        self._play = None
         self._playhead = 0.0 if self._enabled else None
         self._redraw()
 
@@ -84,18 +82,8 @@ class TrimTimeline(ctk.CTkFrame):
         self.peaks = peaks or None
         self._redraw()
 
-    def set_play(self, a: float, b: float) -> None:
-        self._play = (a, b)
-        self._playhead = a
-        self._redraw()
-
     def set_playhead(self, t: float) -> None:
         self._playhead = t
-        self._redraw()
-
-    def clear_play(self) -> None:
-        self._play = None
-        self._playhead = None
         self._redraw()
 
     def set_locked(self, locked: bool) -> None:
@@ -192,10 +180,7 @@ class TrimTimeline(ctk.CTkFrame):
         else:
             c.create_line(PAD, midy, w - PAD, midy, fill=_hex("wave_cut"))
 
-        # the slice being previewed + a moving playhead
-        if self._play:
-            a, b = self._play
-            c.create_rectangle(self._x(a), top, self._x(b), top + 4, fill=_hex("playwin"), outline="")
+        # a moving playhead during preview
         if self._playhead is not None:
             px = self._x(self._playhead)
             c.create_line(px, top, px, bot, fill=_hex("playhead"), width=2)

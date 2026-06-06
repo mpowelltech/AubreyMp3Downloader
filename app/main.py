@@ -208,6 +208,13 @@ class App(ctk.CTk):
         self._play_end = None                   # stop playback here (end of the trimmed section)
         self._audio_seq = 0                     # unique per-song audio subdirs
         self._play_anim = None                  # after-id of the playhead poll loop
+        self._seek_after = None                 # after-id: debounces rapid waveform clicks
+        # Cancel flags: a download/prefetch worker checks these; we set them on
+        # Cancel, Start over, and window-close so yt-dlp/ffmpeg (and their child
+        # processes) are killed promptly instead of orphaned. Fresh per operation
+        # so an old, set flag can never block the next run.
+        self._dl_cancel: threading.Event | None = None
+        self._prefetch_cancel: threading.Event | None = None
         self._last_dir: str | None = None        # remembered save folder (also avoids a
         #   network-namespace folder-picker hang on Parallels: open at a local folder)
         self._badges: dict[int, ctk.CTkLabel] = {}
@@ -342,8 +349,9 @@ class App(ctk.CTk):
                                         placeholder_text="(the song title loads here)")
         self.title_entry.pack(fill="x")
         self.meta_var = tk.StringVar(value="Length: ...")
+        # symfont so the "•" separator renders (Roboto lacks some symbol glyphs on Windows).
         ctk.CTkLabel(info_col, textvariable=self.meta_var, text_color=MUTED, anchor="w",
-                     font=ctk.CTkFont(size=12)).pack(fill="x", pady=(4, 0))
+                     font=symfont(12)).pack(fill="x", pady=(4, 0))
         self.src_link = ctk.CTkLabel(info_col, text="↗  Open the original video",
                                      text_color=PINK, anchor="w", cursor="hand2",
                                      font=symfont(12, underline=True))
@@ -401,7 +409,8 @@ class App(ctk.CTk):
         self.start_var.trace_add("write", lambda *_: self._start_changed())
         self.end_var.trace_add("write", lambda *_: self._end_changed())
         ctk.CTkLabel(
-            b3, text="Drag the pink handles (or type Start/End) to pick the part to keep. "
+            b3, text="Trimming is optional — to keep the whole song, just press “Download MP3”. "
+                     "Otherwise drag the pink handles (or type Start/End) to pick the part to keep. "
                      "Press Play to listen, and click anywhere on the bar to jump there.",
             text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=720, justify="left",
         ).grid(row=3, column=0, sticky="w", pady=(8, 0))
@@ -553,8 +562,23 @@ class App(ctk.CTk):
         self._refresh_go_btn()
 
     def _refresh_download_btn(self) -> None:
+        # While downloading, the one big button becomes a Cancel — the only safe
+        # escape from a long/stuck download (Start over is locked during a run).
+        if self.flow_state == "downloading":
+            self.download_btn.configure(
+                state="normal", text="■  Cancel", fg_color=ERR_TX, hover_color=ERR_TX,
+                text_color="white", command=self._cancel_download)
+            return
+        self.download_btn.configure(text="⬇  Download MP3", command=self._on_download)
         ok = self.flow_state in ("loaded", "done") and self._trim_ok
         self._set_action(self.download_btn, ok)
+
+    def _cancel_download(self) -> None:
+        if self._dl_cancel is not None:
+            self._dl_cancel.set()
+        self.download_btn.configure(state="disabled", text="Stopping…",
+                                    fg_color=DISABLED_BG, text_color=DISABLED_TX)
+        self._status("Stopping the download…")
 
     def _refresh_go_btn(self) -> None:
         ok = (self.flow_state == "empty" and self.ready and not self._searching
@@ -590,6 +614,13 @@ class App(ctk.CTk):
     def _init_engine(self) -> None:
         try:
             _verify_ffmpeg()  # bundled exe (frozen) / on PATH (dev) — fail loudly if absent
+            # Probe the audio backend HERE (a worker), not later on the Tk thread:
+            # opening a miniaudio device can block briefly, and the first
+            # _refresh_transport() call is on the main loop. This warms the cache.
+            try:
+                self._player.is_available()
+            except Exception:
+                pass
             cmd = ensure_ytdlp(status=lambda m: self.q.put(("status", m)))
             self.q.put(("ytdlp", cmd))
             update_in_background(cmd)
@@ -863,6 +894,9 @@ class App(ctk.CTk):
     def _on_new(self) -> None:
         self._player.stop()
         self._cancel_playhead()
+        if self._prefetch_cancel is not None:
+            self._prefetch_cancel.set()  # don't leave a background prefetch running
+            self._prefetch_cancel = None
         self._prefetch_url = None
         self._pending_play = None
         self._seek_pos = 0.0
@@ -934,12 +968,14 @@ class App(ctk.CTk):
         # Reuse the audio already pulled for this video (prefetch/preview), if any.
         cached = self._cached_for(url)
         dur = self.info.duration if self.info else 0
+        self._dl_cancel = threading.Event()   # fresh flag; Cancel/close sets it
         self._set_state("downloading")
         self._status("Preparing..." if cached else "Downloading audio...")
         self._bar_indeterminate()
         threading.Thread(
             target=self._download_worker,
-            args=(url, Path(dest), display_title, start, end, dur, cached), daemon=True).start()
+            args=(url, Path(dest), display_title, start, end, dur, cached, self._dl_cancel),
+            daemon=True).start()
 
     def _cached_for(self, url: str):
         """Return (audio, thumb) already downloaded for ``url``, or None."""
@@ -967,7 +1003,7 @@ class App(ctk.CTk):
         except Exception:
             pass
 
-    def _download_worker(self, url, dest: Path, title, start, end, dur, cached) -> None:
+    def _download_worker(self, url, dest: Path, title, start, end, dur, cached, cancel) -> None:
         try:
             clip_total = None
             base_end = end if end is not None else (dur or 0)
@@ -980,24 +1016,30 @@ class App(ctk.CTk):
                 self.q.put(("status", "Converting to MP3…"))
                 self.q.put(convert_bar)
                 make_mp3(audio, dest, title=title, start=start, end=end, cover=thumb,
-                         total_seconds=clip_total,
+                         total_seconds=clip_total, cancel=cancel,
                          on_progress=lambda f: self.q.put(("progress", f)))
             else:
                 with tempfile.TemporaryDirectory(prefix="aubreymp3_") as tmp:
                     self.q.put(("status", "Downloading audio…"))
                     audio, thumb = download_audio(
-                        self.ytdlp, url, Path(tmp), deno=self.deno,
+                        self.ytdlp, url, Path(tmp), deno=self.deno, cancel=cancel,
                         on_progress=lambda p: self.q.put(("progress", p / 100.0)))
                     self.q.put(("status", "Converting to MP3…"))
                     self.q.put(convert_bar)  # restart the bar for the convert phase
                     make_mp3(audio, dest, title=title, start=start, end=end, cover=thumb,
-                             total_seconds=clip_total,
+                             total_seconds=clip_total, cancel=cancel,
                              on_progress=lambda f: self.q.put(("progress", f)))
             self.q.put(("done", dest))
         except DownloadError as e:
-            self.q.put(("error", str(e)))
+            if str(e) == "__CANCELLED__" or (cancel is not None and cancel.is_set()):
+                self.q.put(("cancelled", None))
+            else:
+                self.q.put(("error", str(e)))
         except Exception as e:
-            self.q.put(("error", f"Something went wrong.\n\n{e}"))
+            if cancel is not None and cancel.is_set():
+                self.q.put(("cancelled", None))
+            else:
+                self.q.put(("error", f"Something went wrong.\n\n{e}"))
 
     # ---- background audio prefetch (so preview + save are instant) -------- #
 
@@ -1005,6 +1047,12 @@ class App(ctk.CTk):
         """Start downloading the full audio for ``url`` in the background (once)."""
         if self._cached_for(url) is not None or self._prefetch_url == url:
             return
+        # Cancel any prefetch still running for a previous song so its yt-dlp
+        # (and children) don't linger; then start a fresh, cancellable one.
+        if self._prefetch_cancel is not None:
+            self._prefetch_cancel.set()
+        self._prefetch_cancel = threading.Event()
+        cancel = self._prefetch_cancel
         self._prefetch_url = url
         self._audio_seq += 1
         # A fresh subdir per song so a previous (still-finishing) prefetch can't
@@ -1014,12 +1062,16 @@ class App(ctk.CTk):
             sub.mkdir(parents=True, exist_ok=True)
         except Exception:
             sub = self._preview_dir
-        threading.Thread(target=self._prefetch_worker, args=(url, sub), daemon=True).start()
+        threading.Thread(target=self._prefetch_worker, args=(url, sub, cancel), daemon=True).start()
 
-    def _prefetch_worker(self, url: str, workdir: Path) -> None:
+    def _prefetch_worker(self, url: str, workdir: Path, cancel) -> None:
         try:
-            audio, thumb = download_audio(self.ytdlp, url, workdir, deno=self.deno)
+            audio, thumb = download_audio(self.ytdlp, url, workdir, deno=self.deno, cancel=cancel)
             self.q.put(("audio_ready", (url, str(audio), str(thumb) if thumb else "")))
+        except DownloadError as e:
+            if str(e) == "__CANCELLED__":
+                return  # superseded/abandoned on purpose — say nothing
+            self.q.put(("audio_error", (url, str(e))))
         except Exception as e:
             self.q.put(("audio_error", (url, str(e))))
 
@@ -1166,8 +1218,24 @@ class App(ctk.CTk):
         except Exception:
             pass
         self.pos_var.set(self._fmt_pos(t))
+        # Only restart playback if it was playing/paused — and debounce, so a flurry
+        # of fast clicks doesn't spawn an ffmpeg pipe + audio device per click.
         if self._player.is_playing() or self._player.is_paused():
-            self._play_from(t)
+            self._cancel_seek()
+            self._seek_after = self.after(180, self._apply_seek)
+
+    def _apply_seek(self) -> None:
+        self._seek_after = None
+        if self.flow_state in ("loaded", "done"):
+            self._play_from(self._seek_pos)
+
+    def _cancel_seek(self) -> None:
+        if self._seek_after is not None:
+            try:
+                self.after_cancel(self._seek_after)
+            except Exception:
+                pass
+            self._seek_after = None
 
     # ---- playhead: poll the player's true position (main thread) ---------- #
 
@@ -1176,6 +1244,9 @@ class App(ctk.CTk):
         self._tick_playhead()
 
     def _tick_playhead(self) -> None:
+        if getattr(self, "_closing", False) or not self.winfo_exists():
+            self._play_anim = None
+            return
         pos = self._player.position()
         end = self._play_end if self._play_end else (self.info.duration if self.info else 0)
         # #4: only ever preview the trimmed section — stop at the end and rewind.
@@ -1210,6 +1281,7 @@ class App(ctk.CTk):
             except Exception:
                 pass
             self._play_anim = None
+        self._cancel_seek()  # a pending debounced seek must not restart stopped playback
 
     # ---- thumbnail preview ------------------------------------------------ #
 
@@ -1316,6 +1388,8 @@ class App(ctk.CTk):
                         self._expand(1)
                 elif kind == "done":
                     self._on_done(Path(str(payload)))
+                elif kind == "cancelled":
+                    self._on_cancelled()
                 elif kind == "setup_error":
                     self._on_setup_error(str(payload))
                 elif kind == "update_available":
@@ -1423,11 +1497,29 @@ class App(ctk.CTk):
             lambda v: self._open_bulk_with_playlist(url) if v == "playlist" else None)
 
     def _on_done(self, path: Path) -> None:
+        self._dl_cancel = None
         self._bar_set(1.0)
         self._set_state("done")
         self._status(f"✓ Done! Saved {path.name}. Click “Start over” for another.")
         if messagebox.askyesno(APP_TITLE, f"Saved:\n{path.name}\n\nOpen the folder?"):
             open_folder(path.parent)
+
+    def _on_cancelled(self) -> None:
+        """A download was cancelled (button or close): back to a usable, trim-able state.
+
+        No partial .mp3 is left behind (make_mp3 writes a temp + os.replace), so
+        the user just lands back on the loaded song, ready to adjust and retry.
+        """
+        self._dl_cancel = None
+        self._bar_set(0)
+        if self.info is not None and self.loaded_url:
+            self._set_state("loaded")
+            self._validate_trim()
+            self._status("Download cancelled. Adjust the trim if you like, then Download MP3.")
+        else:
+            self._set_state("empty")
+            self._expand(1)
+            self._status("Download cancelled.")
 
     def _on_error(self, message: str) -> None:
         self._bar_set(0)
@@ -1472,7 +1564,8 @@ class App(ctk.CTk):
 
     def _do_update(self, info: dict) -> None:
         try:
-            download_and_relaunch(info["url"], status=lambda m: self.q.put(("status", m)))
+            download_and_relaunch(info["url"], expected_size=info.get("size", 0),
+                                  status=lambda m: self.q.put(("status", m)))
             self.q.put(("status", "Update downloaded. Restarting…"))
             self.q.put(("quit_for_update", None))
         except Exception as e:
@@ -1508,6 +1601,12 @@ class App(ctk.CTk):
         if getattr(self, "_closing", False):
             return
         self._closing = True
+        # Tell any running download/prefetch to stop NOW so their yt-dlp/ffmpeg
+        # child processes are killed (proc.kill_tree) rather than orphaned when
+        # the window goes away.
+        for ev in (self._dl_cancel, self._prefetch_cancel):
+            if ev is not None:
+                ev.set()
         try:
             self._cancel_playhead()
         except Exception:

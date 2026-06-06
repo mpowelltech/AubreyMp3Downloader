@@ -20,12 +20,14 @@ pipeline is fully testable on the Mac; only producing the `.exe` needs Windows.
 run.py                 # entry point -> app.main:main
 app/
   paths.py             # dev-vs-frozen resource paths; ffmpeg/cache locations
+  proc.py              # subprocess helpers: no-window + UTF-8 decode; kill_tree()
+                       #   (whole process tree); stream() cancel-aware line runner
   updater.py           # ensure + auto-update yt-dlp AND ensure deno (Windows
                        #   downloads yt-dlp.exe + deno.exe; dev uses PATH)
-  downloader.py        # shells out to yt-dlp: fetch_info(), download_audio(),
-                       #   search() (ytsearch), fetch_playlist() (flat), URL helpers
-  audio.py             # shells out to ffmpeg: make_mp3() (trim/encode/tag/cover)
-                       #   + extract_preview() (short WAV snippet for the trim preview)
+  downloader.py        # shells out to yt-dlp (via proc.stream): fetch_info(),
+                       #   download_audio(), search(), fetch_playlist(), URL helpers
+  audio.py             # shells out to ffmpeg (via proc.stream): make_mp3()
+                       #   (trim/encode/tag/cover, temp-file + os.replace) + waveform()
   media.py             # best-effort thumbnail fetch (certifi) for the song preview
   player.py            # Player: streams ffmpeg-decoded PCM to a miniaudio device
                        #   (play/stop/seek/position); best-effort, lazy-imported
@@ -48,6 +50,20 @@ touch Tk widgets from a worker thread.**
 
 ## Key design decisions (locked with the author)
 
+- **All shell-outs go through `proc.py` for safe cancel + teardown.** yt-dlp
+  spawns ffmpeg/deno *children*, and on Windows `Popen.terminate()` kills only
+  the top process — orphaning those children (they keep downloading after a
+  "cancel"). Worse, `readline()` blocks, so a cancel/close isn't seen until the
+  next line — never, for a stalled download. `proc.stream()` runs a process
+  line-by-line with a watcher thread that `kill_tree()`s the whole tree the
+  instant the `cancel` Event is set (`taskkill /T` on Windows, process group on
+  POSIX) — which also unblocks the blocked `readline()` — then drains + reaps
+  with a bounded wait. Verified on the VM: a cancel returns in ~0.2s with zero
+  lingering `yt-dlp.exe`/`ffmpeg.exe`. Every download/prefetch worker takes a
+  `threading.Event` that `destroy()` / `_on_new` / `BulkView._close` set, so
+  closing/restarting never leaves a child running. `make_mp3` encodes to a
+  sibling `.part.mp3` and `os.replace`s on success only — a cancelled/failed
+  convert can never leave a half-written `.mp3` the user might import.
 - **yt-dlp is never frozen into the exe.** YouTube breaks frozen copies fast.
   Windows downloads `yt-dlp.exe` to `%LOCALAPPDATA%\AubreysYT-MP3-Downloader\`
   on first run and runs `--update` in the background each launch. We shell out

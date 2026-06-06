@@ -420,8 +420,16 @@ class BulkView(ctk.CTkFrame):
 
     def _row_audio_worker(self, row, workdir) -> None:
         try:
-            audio, thumb = download_audio(self.app.ytdlp, row.url, Path(workdir), deno=self.app.deno)
+            # cancel=self._cancel so closing bulk mode (which sets it) kills this
+            # yt-dlp child instead of orphaning it mid-download.
+            audio, thumb = download_audio(self.app.ytdlp, row.url, Path(workdir),
+                                          deno=self.app.deno, cancel=self._cancel)
             self.q.put(("row_audio", (row, str(audio), str(thumb) if thumb else "")))
+        except DownloadError as e:
+            if str(e) == "__CANCELLED__":
+                self.q.put(("row_audio_err", (row, "cancelled")))
+                return
+            self.q.put(("row_audio_err", (row, str(e))))
         except Exception as e:
             self.q.put(("row_audio_err", (row, str(e))))
 
@@ -432,6 +440,8 @@ class BulkView(ctk.CTkFrame):
 
     def _on_row_audio(self, row, path, thumb) -> None:
         self._row_fetching.discard(id(row))
+        if row not in self.rows:
+            return  # the row was deleted/cleared while its audio was downloading
         row.audio = Path(path)
         row.thumb = Path(thumb) if thumb else None
         if row.expanded and row.detail is not None:
@@ -440,10 +450,14 @@ class BulkView(ctk.CTkFrame):
 
     def _on_row_audio_err(self, row) -> None:
         self._row_fetching.discard(id(row))
+        if row not in self.rows:
+            return
         if row.detail is not None:
             row.prev_status_var.set("Couldn't get the audio to preview. You can still download it.")
 
     def _on_row_wave(self, row, peaks) -> None:
+        if row not in self.rows:
+            return
         if row.timeline is not None:
             try:
                 row.timeline.set_waveform(peaks)
@@ -633,6 +647,7 @@ class BulkView(ctk.CTkFrame):
         if self.busy:
             return
         self._row_stop_if_active(row)
+        self._row_fetching.discard(id(row))  # don't track a row that's gone
         if row in self.rows:
             self.rows.remove(row)
             row.frame.destroy()
@@ -644,6 +659,7 @@ class BulkView(ctk.CTkFrame):
             return
         self._row_stop()
         for r in self.rows:
+            self._row_fetching.discard(id(r))
             r.frame.destroy()
         self.rows.clear()
         self._bar_set(0)
@@ -902,6 +918,9 @@ class BulkView(ctk.CTkFrame):
         if self.busy and not messagebox.askyesno(APP_TITLE, "A job is still running. Leave anyway?"):
             return
         self._alive = False
+        # Kill any in-flight batch/preview download (proc.kill_tree) so we don't
+        # orphan a yt-dlp/ffmpeg child or delete _rowdir out from under it.
+        self._cancel.set()
         try:
             self._row_stop()
         except Exception:

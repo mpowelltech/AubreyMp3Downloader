@@ -2,19 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import proc
 from .downloader import DownloadError
 from .paths import ffmpeg_binary
-
-_CREATE_NO_WINDOW = 0x08000000
-
-
-def _no_window() -> dict:
-    return {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
 def make_mp3(
@@ -33,21 +28,37 @@ def make_mp3(
     When ``total_seconds`` and ``on_progress`` are given, reports conversion
     progress (0..1) parsed from ffmpeg. Falls back to no-cover if embedding the
     thumbnail fails, then raises a user-facing error if even that fails. If
-    ``cancel`` (a threading.Event) is set, ffmpeg is terminated and a
-    DownloadError("__CANCELLED__") is raised.
+    ``cancel`` (a threading.Event) is set, ffmpeg's whole process tree is killed
+    and a DownloadError("__CANCELLED__") is raised.
+
+    Encodes to a sibling ``.part.mp3`` and only ``os.replace``s it onto
+    ``out_path`` once it's verified non-empty — so a cancel, crash, or empty
+    encode can NEVER leave a half-written .mp3 the user might try to import.
     """
-    rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, cover), on_progress, total_seconds, cancel)
-    if rc == 0:
-        return
-    if cancel is not None and cancel.is_set():
-        raise DownloadError("__CANCELLED__")
-    if cover is not None:
-        rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, None), on_progress, total_seconds, cancel)
-        if rc == 0:
-            return
+    out_path = Path(out_path)
+    tmp_out = out_path.with_name(out_path.stem + ".part.mp3")
+    try:
+        rc, err = _run(_build_cmd(audio_in, tmp_out, title, start, end, cover),
+                       on_progress, total_seconds, cancel)
+        if rc != 0 and not (cancel is not None and cancel.is_set()) and cover is not None:
+            # Cover embedding can fail on odd thumbnails — retry without it.
+            rc, err = _run(_build_cmd(audio_in, tmp_out, title, start, end, None),
+                           on_progress, total_seconds, cancel)
         if cancel is not None and cancel.is_set():
             raise DownloadError("__CANCELLED__")
-    raise DownloadError("Couldn't convert the audio to MP3. " + (_hint(err) or "Please try again."))
+        if rc != 0:
+            raise DownloadError("Couldn't convert the audio to MP3. "
+                                + (_hint(err) or "Please try again."))
+        if not tmp_out.exists() or tmp_out.stat().st_size <= 0:
+            # ffmpeg said OK but produced nothing usable (e.g. a zero-length clip).
+            raise DownloadError("Couldn't convert the audio to MP3. Please try again.")
+        os.replace(tmp_out, out_path)  # atomic: out_path appears only when complete
+    finally:
+        try:
+            if tmp_out.exists():
+                tmp_out.unlink()  # only reached on failure/cancel (replace consumed it)
+        except OSError:
+            pass
 
 
 def _build_cmd(audio_in, out_path, title, start, end, cover) -> list[str]:
@@ -80,54 +91,29 @@ _PROGRESS_KEYS = ("frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_t
 
 
 def _run(cmd, on_progress=None, total_seconds=None, cancel=None) -> tuple[int, str]:
+    tail: list[str] = []
+
+    def _on_line(raw: str) -> None:
+        line = raw.strip()
+        if line.startswith("out_time_us=") and on_progress and total_seconds:
+            try:
+                frac = (int(line.split("=", 1)[1]) / 1_000_000) / total_seconds
+                on_progress(max(0.0, min(1.0, frac)))
+            except ValueError:
+                pass  # e.g. "out_time_us=N/A" early on
+        elif line and not line.startswith(_PROGRESS_KEYS):
+            tail.append(line)
+            del tail[:-15]
+
     try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **_no_window())
+        # proc.stream kills ffmpeg's whole tree the moment `cancel` is set (even
+        # mid-readline) and reaps it, so a cancel can't hang or orphan ffmpeg.
+        rc = proc.stream(cmd, _on_line, cancel)
     except FileNotFoundError:
         return 1, "ffmpeg not found"
     except Exception as e:  # pragma: no cover - defensive
         return 1, str(e)
-
-    tail: list[str] = []
-    if proc.stdout is not None:
-        for raw in iter(proc.stdout.readline, ""):
-            if cancel is not None and cancel.is_set():
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-                break
-            line = raw.strip()
-            if line.startswith("out_time_us=") and on_progress and total_seconds:
-                try:
-                    frac = (int(line.split("=", 1)[1]) / 1_000_000) / total_seconds
-                    on_progress(max(0.0, min(1.0, frac)))
-                except ValueError:
-                    pass  # e.g. "out_time_us=N/A" early on
-            elif line and not line.startswith(_PROGRESS_KEYS):
-                tail.append(line)
-                del tail[:-15]
-    proc.wait()
-    return proc.returncode, "\n".join(tail)
-
-
-def extract_preview(audio_in: Path, out_wav: Path, start: float, dur: float = 6.0) -> bool:
-    """Cut a short WAV snippet for the trim preview. Best-effort: returns False on any error.
-
-    PCM WAV at 44.1 kHz so Windows' ``winsound`` can play it directly.
-    """
-    cmd = [
-        ffmpeg_binary(), "-y", "-hide_banner", "-loglevel", "error",
-        "-ss", f"{max(0.0, start):.3f}", "-i", str(audio_in),
-        "-t", f"{max(0.5, dur):.3f}",
-        "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(out_wav),
-    ]
-    try:
-        rc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            timeout=60, **_no_window()).returncode
-    except Exception:
-        return False
-    return rc == 0 and out_wav.exists() and out_wav.stat().st_size > 1024
+    return rc, "\n".join(tail)
 
 
 def waveform(audio_in: Path, buckets: int = 400):
@@ -139,10 +125,10 @@ def waveform(audio_in: Path, buckets: int = 400):
     cmd = [ffmpeg_binary(), "-v", "error", "-i", str(audio_in),
            "-ac", "1", "-ar", "4000", "-f", "s16le", "-"]
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              timeout=120, **_no_window())
-        raw = proc.stdout
-        if proc.returncode != 0 or not raw:
+        cp = proc.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                      timeout=120)
+        raw = cp.stdout
+        if cp.returncode != 0 or not raw:
             return None
         samples = array.array("h")
         samples.frombytes(raw[: (len(raw) // 2) * 2])

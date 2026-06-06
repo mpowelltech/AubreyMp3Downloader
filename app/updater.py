@@ -183,23 +183,44 @@ def check_for_app_update(current_version: str) -> Optional[dict]:
         tag = data.get("tag_name") or ""
         if _ver_tuple(tag) <= _ver_tuple(current_version):
             return None
-        url = next((a.get("browser_download_url") for a in data.get("assets", [])
-                    if str(a.get("name", "")).lower().endswith(".exe")), None)
-        return {"tag": tag, "url": url} if url else None
+        asset = next((a for a in data.get("assets", [])
+                      if str(a.get("name", "")).lower().endswith(".exe")), None)
+        if not asset or not asset.get("browser_download_url"):
+            return None
+        return {"tag": tag, "url": asset["browser_download_url"],
+                "size": int(asset.get("size") or 0)}
     except Exception:
         return None
 
 
-def download_and_relaunch(asset_url: str, status: Optional[Callable[[str], None]] = None) -> None:
-    """Download the new exe beside the current one, then spawn a helper that
-    waits for this process to exit, swaps the exe in place, and relaunches it.
+def download_and_relaunch(asset_url: str, expected_size: int = 0,
+                          status: Optional[Callable[[str], None]] = None) -> None:
+    """Download the new exe beside the current one, verify it, then spawn a helper
+    that waits for this process to exit, swaps the exe in place, and relaunches it.
     The caller must exit the app right after this returns.
+
+    Verifies the download against the size GitHub reported (and a sane minimum) so
+    a truncated/partial download can NEVER be swapped in and brick the install — a
+    short download raises here instead, leaving the current exe untouched.
     """
     current = Path(sys.executable)
     new = current.with_name(current.stem + ".update.exe")
     if status:
         status("Downloading update…")
-    _download(asset_url, new)
+    try:
+        _download(asset_url, new)
+        got = new.stat().st_size if new.exists() else 0
+        if got < 1_000_000 or (expected_size and got != expected_size):
+            raise RuntimeError(
+                f"the download was incomplete ({got} bytes"
+                + (f", expected {expected_size}" if expected_size else "") + ")")
+    except Exception:
+        try:
+            if new.exists():
+                new.unlink()  # don't leave a half-downloaded exe lying around
+        except OSError:
+            pass
+        raise
     _spawn_replacer(current, new)
 
 

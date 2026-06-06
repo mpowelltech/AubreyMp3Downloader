@@ -51,7 +51,17 @@ try:
 except Exception:
     pass
 
-binaries = list(ctk_binaries) + list(ma_binaries)
+# certifi: updater.py verifies every HTTPS download against certifi's CA bundle
+# (a fresh Windows PC's cert store may lack the needed root, and Python's OpenSSL
+# won't fetch it on demand -> CERTIFICATE_VERIFY_FAILED). The bundle is a DATA
+# file (cacert.pem); without collecting it the frozen exe can't find it and first
+# launch fails to download yt-dlp/deno. Bundle the data + hidden import.
+try:
+    cert_datas, cert_binaries, cert_hidden = collect_all("certifi")
+except Exception:
+    cert_datas, cert_binaries, cert_hidden = [], [], ["certifi"]
+
+binaries = list(ctk_binaries) + list(ma_binaries) + list(cert_binaries)
 _ffmpeg = os.path.join(HERE, "build", "ffmpeg.exe")
 if os.path.exists(_ffmpeg):
     binaries.append((_ffmpeg, "."))   # extracted next to the exe at runtime
@@ -60,7 +70,7 @@ _icon = os.path.join(HERE, "assets", "icon.ico")
 icon = _icon if os.path.exists(_icon) else None
 assert icon, "assets/icon.ico not found — the exe would have no icon"
 
-datas = list(ctk_datas) + list(ma_datas)
+datas = list(ctk_datas) + list(ma_datas) + list(cert_datas)
 _assets = os.path.join(HERE, "assets")
 if os.path.isdir(_assets):
     datas.append((_assets, "assets"))   # bundle icon.ico / icon.png for the runtime window icon
@@ -70,7 +80,7 @@ a = Analysis(
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=list(ctk_hidden) + list(ma_hidden),
+    hiddenimports=list(ctk_hidden) + list(ma_hidden) + list(cert_hidden),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
