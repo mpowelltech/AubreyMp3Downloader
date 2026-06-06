@@ -26,7 +26,7 @@ from .downloader import (DownloadError, download_audio, fetch_info, fetch_playli
                          has_playlist, has_single_video, looks_like_url)
 from .main import (APP_TITLE, CARD_BG, DISABLED_BG, DISABLED_TX, DONE, MUTED,
                    PINK, PINK_HOVER, SECONDARY, SECONDARY_H, TITLE_ON, WINDOW_BG,
-                   clean_url, fmt_time, open_folder, parse_time, safe_filename)
+                   clean_url, fmt_time, open_folder, parse_time, safe_filename, symfont)
 
 ERR = ("#C0392B", "#E57373")
 DEL_HOVER = ("#E8A6A6", "#7E3A3A")
@@ -81,7 +81,7 @@ class BulkRow:
         self.frame = ctk.CTkFrame(master, corner_radius=8, fg_color=("white", "gray17"))
         self.frame.grid_columnconfigure(1, weight=1)
         # one aligned control row...
-        self.icon = ctk.CTkLabel(self.frame, text="•", width=22, height=H, font=ctk.CTkFont(size=15, weight="bold"))
+        self.icon = ctk.CTkLabel(self.frame, text="•", width=22, height=H, font=symfont(15, "bold"))
         self.icon.grid(row=0, column=0, padx=(12, 2), pady=(10, 0))
         self.title_entry = ctk.CTkEntry(self.frame, textvariable=self.title_var, height=H,
                                         placeholder_text="(loads on Get info)")
@@ -92,12 +92,12 @@ class BulkRow:
         self.end_entry.grid(row=0, column=3, padx=(2, 4), pady=(10, 0))
         self.del_btn = ctk.CTkButton(
             self.frame, text="✕", width=32, height=H, fg_color=SECONDARY, hover_color=DEL_HOVER,
-            text_color=TITLE_ON, command=lambda: self.on_delete(self))
+            text_color=TITLE_ON, font=symfont(13), command=lambda: self.on_delete(self))
         self.del_btn.grid(row=0, column=4, padx=(2, 12), pady=(10, 0))
         # ...with the status/URL line beneath the title.
         self.info_lbl = ctk.CTkLabel(
             self.frame, text=_short(self.url), text_color=MUTED,
-            font=ctk.CTkFont(size=11), anchor="w", justify="left")
+            font=symfont(11), anchor="w", justify="left")
         self.info_lbl.grid(row=1, column=1, columnspan=3, sticky="w", padx=6, pady=(2, 10))
         # The info line shows the link — make it clickable to open the source.
         if str(self.url).startswith("http"):
@@ -186,7 +186,7 @@ class BulkView(ctk.CTkFrame):
         header.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 2))
         header.grid_columnconfigure(1, weight=1)
         ctk.CTkButton(header, text="←  One song", width=110, fg_color=SECONDARY,
-                      hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._close
+                      hover_color=SECONDARY_H, text_color=TITLE_ON, font=symfont(13), command=self._close
                       ).grid(row=0, column=0, sticky="w")
         tl = ctk.CTkFrame(header, fg_color="transparent")
         tl.grid(row=0, column=1)
@@ -234,11 +234,11 @@ class BulkView(ctk.CTkFrame):
         actions.grid(row=4, column=0, sticky="ew", padx=18, pady=(8, 2))
         actions.grid_columnconfigure((0, 1), weight=1)
         self.get_btn = ctk.CTkButton(actions, text="Get info for all  →", height=44,
-                                     font=ctk.CTkFont(size=15, weight="bold"),
+                                     font=symfont(15, "bold"),
                                      fg_color=PINK, hover_color=PINK_HOVER, command=self._get_info_all)
         self.get_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.download_btn = ctk.CTkButton(actions, text="Download all", height=44,
-                                          font=ctk.CTkFont(size=15, weight="bold"),
+        self.download_btn = ctk.CTkButton(actions, text="⬇  Download all", height=44,
+                                          font=symfont(15, "bold"),
                                           fg_color=PINK, hover_color=PINK_HOVER, command=self._download_all)
         self.download_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
@@ -246,7 +246,7 @@ class BulkView(ctk.CTkFrame):
         self.progress.grid(row=5, column=0, sticky="ew", padx=18, pady=(8, 2))
         self.progress.set(0)
         self.status_var = tk.StringVar(value="Add some YouTube links to get started.")
-        ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", justify="left",
+        ctk.CTkLabel(self, textvariable=self.status_var, anchor="w", justify="left", font=symfont(12),
                      wraplength=740, text_color=MUTED).grid(row=6, column=0, sticky="ew", padx=18, pady=(0, 14))
 
     # ---- progress bar helpers ----
@@ -363,7 +363,7 @@ class BulkView(ctk.CTkFrame):
         n_ok = sum(1 for r in self.rows if r.status in ("ok", "done"))
         self._set_action(self.get_btn, bool(self.rows) and not self.busy)
         self._set_action(self.download_btn, any_ok and not self.busy)
-        self.download_btn.configure(text=f"Download all ({n_ok})" if n_ok else "Download all")
+        self.download_btn.configure(text=f"⬇  Download all ({n_ok})" if n_ok else "⬇  Download all")
 
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
@@ -441,9 +441,13 @@ class BulkView(ctk.CTkFrame):
         if not jobs:
             messagebox.showinfo(APP_TITLE, "Load at least one song first (Get info for all).")
             return
-        folder = filedialog.askdirectory(title="Choose a folder to save all the MP3s")
+        # initialdir keeps the native folder picker from enumerating the shell root
+        # (incl. Parallels \\Mac network shares), which can hang the UI on a VM.
+        folder = filedialog.askdirectory(
+            title="Choose a folder to save all the MP3s", initialdir=self.app.default_dir())
         if not folder:
             return
+        self.app._last_dir = folder or self.app._last_dir
         self._set_busy(True)
         self._bar_set(0)
         threading.Thread(target=self._download_worker, args=(jobs, Path(folder)), daemon=True).start()
@@ -489,14 +493,17 @@ class BulkView(ctk.CTkFrame):
     def _poll(self) -> None:
         if not self._alive or not self.winfo_exists():
             return  # frame was closed; stop rescheduling
+        _last_prog = None  # coalesce a flood of progress msgs into ONE redraw per tick
         try:
             while True:
                 kind, payload = self.q.get_nowait()
                 if kind == "status":
                     self.status_var.set(str(payload))
                 elif kind == "progress":
-                    self._bar_set(float(payload))  # type: ignore[arg-type]
+                    _last_prog = float(payload)  # type: ignore[arg-type]
+                    continue
                 elif kind == "busy_bar":
+                    _last_prog = None  # indeterminate supersedes any pending progress
                     self._bar_indeterminate()
                 elif kind == "row_loading":
                     payload.set_status("loading")  # type: ignore[union-attr]
@@ -531,7 +538,7 @@ class BulkView(ctk.CTkFrame):
                     self._set_busy(False)
                     self._bar_set(1.0 if ok else 0)
                     msg = f"Saved {ok} song{'s' if ok != 1 else ''}" + (f", {fail} failed" if fail else "") + "."
-                    self.status_var.set("✓ " + msg)
+                    self.status_var.set("Done. " + msg)
                     if ok and messagebox.askyesno(APP_TITLE, msg + "\n\nOpen the folder?"):
                         open_folder(folder)
         except queue.Empty:
@@ -543,6 +550,11 @@ class BulkView(ctk.CTkFrame):
             except Exception:
                 pass
         finally:
+            if _last_prog is not None:
+                try:
+                    self._bar_set(_last_prog)   # one redraw per tick, not per message
+                except Exception:
+                    pass
             if self._alive and self.winfo_exists():
                 self.after(100, self._poll)
 

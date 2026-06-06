@@ -208,6 +208,8 @@ class App(ctk.CTk):
         self._play_end = None                   # stop playback here (end of the trimmed section)
         self._audio_seq = 0                     # unique per-song audio subdirs
         self._play_anim = None                  # after-id of the playhead poll loop
+        self._last_dir: str | None = None        # remembered save folder (also avoids a
+        #   network-namespace folder-picker hang on Parallels: open at a local folder)
         self._badges: dict[int, ctk.CTkLabel] = {}
         self._titles: dict[int, ctk.CTkLabel] = {}
         self.q: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -426,7 +428,7 @@ class App(ctk.CTk):
         self.progress.set(0)
         self.status_var = tk.StringVar(value="Starting up…")
         ctk.CTkLabel(
-            self, textvariable=self.status_var, anchor="w", justify="left",
+            self, textvariable=self.status_var, anchor="w", justify="left", font=symfont(12),
             wraplength=780, text_color=MUTED).grid(row=6, column=0, sticky="ew", padx=PADX, pady=(0, 12))
 
         self._step3_widgets = [self.start_entry, self.end_entry]
@@ -906,11 +908,14 @@ class App(ctk.CTk):
         display_title = self.title_var.get().strip() or "audio"
         dest = filedialog.asksaveasfilename(
             title="Save MP3 as…", defaultextension=".mp3",
+            initialdir=self.default_dir(),
             initialfile=f"{safe_filename(display_title)}.mp3",
             filetypes=[("MP3 audio", "*.mp3")])
         if not dest:
             return
         dest = str(dest)
+        import os
+        self._last_dir = os.path.dirname(dest) or self._last_dir
         if not dest.lower().endswith(".mp3"):
             dest += ".mp3"
             # The Save dialog only confirmed overwrite for the name the user typed;
@@ -1210,6 +1215,21 @@ class App(ctk.CTk):
         img = fetch_image(thumb_url, box=160)
         if img is not None:
             self.q.put(("thumb", (url, img)))
+
+    def default_dir(self) -> str | None:
+        """A sensible LOCAL folder for save dialogs to open at.
+
+        Opening the native folder picker without an initialdir lets it enumerate the
+        shell root (incl. network/Parallels `\\Mac` shares), which can hang the UI.
+        Anchoring it at a local folder avoids that and remembers the last choice.
+        """
+        import os
+        if self._last_dir and os.path.isdir(self._last_dir):
+            return self._last_dir
+        for cand in (os.path.join(os.path.expanduser("~"), "Downloads"), os.path.expanduser("~")):
+            if os.path.isdir(cand):
+                return cand
+        return None
 
     def _open_source(self) -> None:
         """Open the loaded video in the default browser (e.g. to find trim points)."""
