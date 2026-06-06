@@ -708,6 +708,9 @@ class BulkView(ctk.CTkFrame):
     def _download_all(self) -> None:
         if self.busy or not self.app.ready:
             return
+        # Stop any preview FIRST, so the audio device is torn down before the native
+        # folder picker opens — an open device + the modal picker can hang on Parallels.
+        self._row_stop()
         jobs, errs = [], []
         for r in self.rows:
             if r.status not in ("ok", "done"):

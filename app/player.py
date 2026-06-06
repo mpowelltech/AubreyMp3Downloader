@@ -144,22 +144,35 @@ class Player:
             self._paused = False
 
     def stop(self) -> None:
-        """Stop playback, kill the ffmpeg pipe, close the device. Any state, any thread."""
+        """Stop playback, kill the ffmpeg pipe, close the device. Any state, any thread.
+
+        NON-BLOCKING: setting _active False makes the audio callback return silence
+        immediately (sound stops at once), and the device teardown — miniaudio's
+        ma_device_uninit can block for a moment — runs on a daemon thread so it can
+        NEVER freeze the Tk main thread (which is what calls stop()).
+        """
         with self._lock:
             self._active = False
             proc, dev = self._proc, self._dev
             self._proc = self._dev = None
             self._paused = False
-        # Kill ffmpeg FIRST so a generator blocked in read() unblocks, then stop device.
+        # Kill ffmpeg FIRST so a generator blocked in read() unblocks.
         try:
             if proc and proc.poll() is None:
                 proc.terminate()
         except Exception:
             pass
+        if dev is not None:
+            threading.Thread(target=self._teardown, args=(dev,), daemon=True).start()
+
+    @staticmethod
+    def _teardown(dev) -> None:
         try:
-            if dev is not None:
-                dev.stop()
-                dev.close()
+            dev.stop()
+        except Exception:
+            pass
+        try:
+            dev.close()
         except Exception:
             pass
 
