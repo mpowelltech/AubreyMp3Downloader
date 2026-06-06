@@ -204,3 +204,17 @@ Requires `yt-dlp` and `ffmpeg` on PATH for dev (`brew install yt-dlp ffmpeg`).
 - Don't add `yt-dlp` to `requirements.txt` — it's intentionally runtime-managed.
 - The exe filename is `Aubreys-YT-MP3-Downloader` (no apostrophe/spaces, to keep
   paths clean); the window title keeps the apostrophe (`APP_TITLE`).
+- **Symbol glyphs need `symfont()`.** customtkinter's default font is **Roboto,
+  which has NONE of the symbol glyphs** (▶ ⏸ ⏮ ⬇ ✓ ♪ ▾ ▸ ↗ ☰ ↺ ♥) — on Windows
+  they render as tofu boxes. Any widget showing such a glyph must use
+  `symfont(size, weight)` (→ "Segoe UI Symbol" on Windows, default elsewhere).
+  Plain-text/Latin widgets can stay on the default. (Verified glyph coverage on a
+  Windows VM: Roboto = none, Segoe UI Symbol = all.)
+- **Trim player previews ONLY the kept section.** The mini player clamps play /
+  seek into `[start, end]` (`_trim_bounds`), stops at the end and rewinds to the
+  start (`_tick_playhead`); Play↔Pause toggles (`_toggle_play`); "Back to start"
+  (`_player_back`) returns to the trim start, not the song start.
+- **Don't run the one-file exe from a UNC / network path** (e.g. a Parallels
+  `\\Mac\Home` shared folder): the PyInstaller bootloader can't load its embedded
+  PKG archive there ("Could not load PyInstaller's embedded PKG archive"). Run it
+  from a local folder. Real users downloading to their own Downloads are fine.

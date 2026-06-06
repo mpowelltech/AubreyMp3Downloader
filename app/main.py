@@ -134,6 +134,18 @@ def _verify_ffmpeg() -> None:
         raise RuntimeError("ffmpeg is missing from the app. Please reinstall the app.")
 
 
+def symfont(size: int, weight: str = "normal", underline: bool = False):
+    """A font that can render symbol glyphs (▶ ⏸ ✓ ♪ ▾ …).
+
+    CustomTkinter's default font is Roboto, which has NONE of these glyphs, so on
+    Windows they render as tofu boxes. 'Segoe UI Symbol' (always present on Win)
+    has them all. On macOS/Linux the default font already renders them, so we keep
+    the default there. Must be called after the Tk root exists.
+    """
+    fam = "Segoe UI Symbol" if sys.platform == "win32" else None
+    return ctk.CTkFont(family=fam, size=size, weight=weight, underline=underline)
+
+
 def open_folder(folder: Path) -> None:
     try:
         if sys.platform == "win32":
@@ -193,6 +205,7 @@ class App(ctk.CTk):
         self._prefetch_url: str | None = None   # url whose audio is downloading now
         self._pending_play = None               # seconds to play once audio is ready
         self._seek_pos = 0.0                    # where Play will start (set by waveform clicks)
+        self._play_end = None                   # stop playback here (end of the trimmed section)
         self._audio_seq = 0                     # unique per-song audio subdirs
         self._play_anim = None                  # after-id of the playhead poll loop
         self._badges: dict[int, ctk.CTkLabel] = {}
@@ -215,11 +228,11 @@ class App(ctk.CTk):
         head.grid(row=0, column=0, sticky="ew", padx=14, pady=10)
         head.grid_columnconfigure(1, weight=1)
         badge = ctk.CTkLabel(head, text=str(number), width=26, height=26, corner_radius=13,
-                             font=ctk.CTkFont(size=13, weight="bold"))
+                             font=symfont(13, "bold"))
         badge.grid(row=0, column=0, padx=(0, 10))
         title_lbl = ctk.CTkLabel(head, text=title, anchor="w", font=ctk.CTkFont(size=15, weight="bold"))
         title_lbl.grid(row=0, column=1, sticky="w")
-        chevron = ctk.CTkLabel(head, text="", width=18, text_color=MUTED, font=ctk.CTkFont(size=14))
+        chevron = ctk.CTkLabel(head, text="", width=18, text_color=MUTED, font=symfont(14))
         chevron.grid(row=0, column=2, padx=(8, 0))
         body = ctk.CTkFrame(card, fg_color="transparent")
         body.grid_columnconfigure(0, weight=1)
@@ -255,16 +268,16 @@ class App(ctk.CTk):
             text_color=MUTED, font=ctk.CTkFont(size=12)).pack(anchor="w")
         ctk.CTkLabel(
             titles, text="Built by Matt for my favourite niece ♥",
-            text_color=PINK, font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w")
+            text_color=PINK, font=symfont(11, "bold")).pack(anchor="w")
         right = ctk.CTkFrame(header, fg_color="transparent")
         right.grid(row=0, column=ncol, sticky="e", padx=(8, 0))
         self.several_btn = ctk.CTkButton(
             right, text="☰  Download several", width=160, height=30, fg_color=SECONDARY,
-            hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_several)
+            hover_color=SECONDARY_H, text_color=TITLE_ON, font=symfont(13), command=self._on_several)
         self.several_btn.pack(fill="x")
         self.new_btn = ctk.CTkButton(
             right, text="↺  Start over", width=160, height=30, fg_color=SECONDARY,
-            hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._on_new)
+            hover_color=SECONDARY_H, text_color=TITLE_ON, font=symfont(13), command=self._on_new)
         self.new_btn.pack(fill="x", pady=(5, 0))
 
         # ===== Section 1: find the song =====
@@ -316,7 +329,7 @@ class App(ctk.CTk):
         toprow.grid(row=0, column=0, sticky="ew")
         self.thumb_lbl = ctk.CTkLabel(
             toprow, text="♪", width=72, height=72, corner_radius=10,
-            fg_color=THUMB_BG, text_color=MUTED, font=ctk.CTkFont(size=30))
+            fg_color=THUMB_BG, text_color=MUTED, font=symfont(30))
         self.thumb_lbl.pack(side="left", padx=(0, 12))
         self.thumb_lbl.bind("<Button-1>", lambda _e: self._open_source())
         info_col = ctk.CTkFrame(toprow, fg_color="transparent")
@@ -331,7 +344,7 @@ class App(ctk.CTk):
                      font=ctk.CTkFont(size=12)).pack(fill="x", pady=(4, 0))
         self.src_link = ctk.CTkLabel(info_col, text="↗  Open the original video",
                                      text_color=PINK, anchor="w", cursor="hand2",
-                                     font=ctk.CTkFont(size=12, underline=True))
+                                     font=symfont(12, underline=True))
         self.src_link.pack(anchor="w", pady=(4, 0))
         self.src_link.bind("<Button-1>", lambda _e: self._open_source())
         ctk.CTkLabel(
@@ -340,7 +353,7 @@ class App(ctk.CTk):
             text_color=MUTED, font=ctk.CTkFont(size=12), wraplength=720, justify="left",
         ).grid(row=1, column=0, sticky="w", pady=(10, 0))
         ctk.CTkButton(b2, text="Next: Trim  ▾", width=130, height=30, fg_color=SECONDARY,
-                      hover_color=SECONDARY_H, text_color=TITLE_ON,
+                      hover_color=SECONDARY_H, text_color=TITLE_ON, font=symfont(13),
                       command=lambda: self._acc_click(3)).grid(
             row=2, column=0, sticky="w", pady=(10, 0))
 
@@ -357,14 +370,14 @@ class App(ctk.CTk):
         trans = ctk.CTkFrame(b3, fg_color="transparent")
         trans.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         self.dl_preview_btn = ctk.CTkButton(
-            trans, text="⤓  Download to preview", height=32, fg_color=PINK, hover_color=PINK_HOVER,
-            font=ctk.CTkFont(size=13, weight="bold"), command=self._on_download_preview)
+            trans, text="⬇  Download to preview", height=32, fg_color=PINK, hover_color=PINK_HOVER,
+            font=symfont(13, "bold"), command=self._on_download_preview)
         self.play_btn = ctk.CTkButton(
-            trans, text="▶  Play", width=110, height=32, fg_color=PINK, hover_color=PINK_HOVER,
-            font=ctk.CTkFont(size=13, weight="bold"), command=self._player_play)
+            trans, text="▶  Play", width=120, height=32, fg_color=PINK, hover_color=PINK_HOVER,
+            font=symfont(13, "bold"), command=self._toggle_play)
         self.stop_btn = ctk.CTkButton(
-            trans, text="■  Stop", width=90, height=32, fg_color=SECONDARY,
-            hover_color=SECONDARY_H, text_color=TITLE_ON, command=self._player_stop)
+            trans, text="⏮  Back to start", width=140, height=32, fg_color=SECONDARY,
+            hover_color=SECONDARY_H, text_color=TITLE_ON, font=symfont(13), command=self._player_back)
         self.pos_var = tk.StringVar(value="")
         self.pos_lbl = ctk.CTkLabel(trans, textvariable=self.pos_var, text_color=MUTED,
                                     font=ctk.CTkFont(size=12))
@@ -396,14 +409,14 @@ class App(ctk.CTk):
                      justify="left").grid(row=4, column=0, sticky="w", pady=(2, 0))
         self.src_link2 = ctk.CTkLabel(b3, text="↗  Open the original video",
                                       text_color=PINK, anchor="w", cursor="hand2",
-                                      font=ctk.CTkFont(size=12, underline=True))
+                                      font=symfont(12, underline=True))
         self.src_link2.grid(row=5, column=0, sticky="w", pady=(8, 0))
         self.src_link2.bind("<Button-1>", lambda _e: self._open_source())
 
         # --- Download (primary action) ---
         self.download_btn = ctk.CTkButton(
-            self, text="Download MP3", height=46,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            self, text="⬇  Download MP3", height=46,
+            font=symfont(15, "bold"),
             fg_color=PINK, hover_color=PINK_HOVER, command=self._on_download)
         self.download_btn.grid(row=4, column=0, sticky="ew", padx=PADX, pady=(10, 4))
 
@@ -1018,7 +1031,7 @@ class App(ctk.CTk):
         self._refresh_transport()
         pending, self._pending_play = self._pending_play, None
         if pending is not None and self.flow_state in ("loaded", "done"):
-            self._start_play(pending)
+            self._play_from(pending)
         elif self.flow_state in ("loaded", "done"):
             self._status("Ready. Press Play to listen, or just Download MP3.")
 
@@ -1044,6 +1057,7 @@ class App(ctk.CTk):
             self.play_btn.grid(row=0, column=0, padx=(0, 6))
             self.stop_btn.grid(row=0, column=1, padx=(0, 12))
             self.pos_lbl.grid(row=0, column=2, sticky="w")
+            self._refresh_play_btn()
         elif self._prefetch_url == self.loaded_url:
             self.preview_note_var.set("Getting the song ready to preview...")
             self.preview_note.grid(row=0, column=0, sticky="w")
@@ -1061,38 +1075,92 @@ class App(ctk.CTk):
         self._status("Getting the song ready to preview (downloads once, then it's instant).")
         self._refresh_transport()
 
-    def _player_play(self) -> None:
+    def _trim_bounds(self) -> tuple:
+        """Return (start, end) of the kept section in seconds, clamped to the song."""
+        dur = self.info.duration if self.info else 0.0
+        try:
+            s = max(0.0, parse_time(self.start_var.get()))
+        except ValueError:
+            s = 0.0
+        etext = self.end_var.get().strip()
+        try:
+            e = parse_time(etext) if etext else dur
+        except ValueError:
+            e = dur
+        if dur > 0:
+            s = min(s, dur)
+            e = min(e, dur) if e else dur
+        if e <= s:
+            e = dur if dur > s else s + 1.0
+        return s, e
+
+    def _refresh_play_btn(self) -> None:
+        self.play_btn.configure(text="⏸  Pause" if self._player.is_playing() else "▶  Play")
+
+    def _toggle_play(self) -> None:
         if self.flow_state not in ("loaded", "done") or not self.loaded_url:
             return
+        if self._player.is_playing():
+            self._player.pause()
+            self._cancel_playhead()
+            self._refresh_play_btn()
+            self._status("Paused. Press Play to continue.")
+            return
+        if self._player.is_paused():
+            self._player.resume()
+            self._begin_playhead()
+            self._refresh_play_btn()
+            self._status("Playing your trimmed clip...")
+            return
+        # stopped: play from the chosen spot, within the trimmed section
         if self._cached_for(self.loaded_url) is None:
-            # not downloaded yet: fetch, then auto-play from the chosen position
             self._pending_play = self._seek_pos
             self._ensure_audio(self.loaded_url)
             self._status("Getting the song ready, then it will play...")
             self._refresh_transport()
             return
-        self._start_play(self._seek_pos)
+        self._play_from(self._seek_pos)
 
-    def _start_play(self, from_seconds: float) -> None:
-        if self._player.play(max(0.0, from_seconds)):
-            self._status("Playing. Click anywhere on the bar to jump, or press Stop.")
+    def _play_from(self, pos: float) -> None:
+        """Play within the trimmed section, starting at ``pos`` (clamped into it)."""
+        s, e = self._trim_bounds()
+        pos = min(max(pos, s), max(s, e - 0.05))
+        self._play_end = e            # the playhead loop stops here (don't play past the trim)
+        self._seek_pos = pos
+        if self._player.play(pos):
+            self._refresh_play_btn()
+            self._status("Playing your trimmed clip. Click the bar to jump, or Back to start.")
             self._begin_playhead()
         else:
             self._status("Couldn't play the preview on this PC, but your trim will still save fine.")
 
-    def _player_stop(self) -> None:
+    def _player_back(self) -> None:
+        """Stop and return the playhead to the START of the trimmed section."""
         self._player.stop()
         self._cancel_playhead()
-        self._status("Stopped.")
+        s, _ = self._trim_bounds()
+        self._seek_pos = s
+        try:
+            self.timeline.set_playhead(s)
+        except Exception:
+            pass
+        self.pos_var.set(self._fmt_pos(s))
+        self._refresh_play_btn()
 
     def _on_seek(self, t: float) -> None:
-        """User clicked the waveform body: set the play-from position (and seek if playing)."""
+        """User clicked the waveform: set the play position, clamped INTO the trim."""
         if self.flow_state not in ("loaded", "done"):
             return
-        self._seek_pos = max(0.0, float(t))
-        self.pos_var.set(self._fmt_pos(self._seek_pos))
-        if self._player.is_active():
-            self._start_play(self._seek_pos)
+        s, e = self._trim_bounds()
+        t = min(max(float(t), s), max(s, e - 0.05))   # never outside the trimmed section
+        self._seek_pos = t
+        try:
+            self.timeline.set_playhead(t)
+        except Exception:
+            pass
+        self.pos_var.set(self._fmt_pos(t))
+        if self._player.is_playing() or self._player.is_paused():
+            self._play_from(t)
 
     # ---- playhead: poll the player's true position (main thread) ---------- #
 
@@ -1102,6 +1170,21 @@ class App(ctk.CTk):
 
     def _tick_playhead(self) -> None:
         pos = self._player.position()
+        end = self._play_end if self._play_end else (self.info.duration if self.info else 0)
+        # #4: only ever preview the trimmed section — stop at the end and rewind.
+        if self._player.has_ended() or (self._player.is_playing() and end and pos >= end - 0.03):
+            self._player.stop()
+            self._cancel_playhead()
+            s, _ = self._trim_bounds()
+            self._seek_pos = s
+            try:
+                self.timeline.set_playhead(s)
+            except Exception:
+                pass
+            self.pos_var.set(self._fmt_pos(s))
+            self._refresh_play_btn()
+            self._status("That's your trimmed clip. Press Play to hear it again.")
+            return
         try:
             self.timeline.set_playhead(pos)
         except Exception:
@@ -1111,9 +1194,7 @@ class App(ctk.CTk):
             self._play_anim = self.after(60, self._tick_playhead)
         else:
             self._play_anim = None
-            if self._player.has_ended():
-                self._player.stop()  # release the device/ffmpeg once it's drained
-                self._status("Finished playing. Press Play to listen again.")
+            self._refresh_play_btn()
 
     def _cancel_playhead(self) -> None:
         if self._play_anim is not None:
@@ -1503,7 +1584,7 @@ class ChooserView(ctk.CTkFrame):
         ctk.CTkLabel(row, text=r.uploader or "", anchor="w", text_color=MUTED,
                      font=ctk.CTkFont(size=11)).grid(row=1, column=1, sticky="ew", padx=4, pady=(0, 10))
         ctk.CTkButton(row, text="Use this  ▸", width=104, height=34,
-                      fg_color=PINK, hover_color=PINK_HOVER,
+                      fg_color=PINK, hover_color=PINK_HOVER, font=symfont(13),
                       command=lambda u=r.url: self.on_choose(u)).grid(
             row=0, column=2, rowspan=2, padx=(6, 12), pady=10)
 
