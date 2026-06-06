@@ -26,20 +26,27 @@ def make_mp3(
     cover: Optional[Path] = None,
     total_seconds: Optional[float] = None,
     on_progress: Optional[Callable[[float], None]] = None,
+    cancel=None,
 ) -> None:
     """Trim to ``[start, end]``, encode MP3 (~190kbps VBR), tag + embed cover.
 
     When ``total_seconds`` and ``on_progress`` are given, reports conversion
     progress (0..1) parsed from ffmpeg. Falls back to no-cover if embedding the
-    thumbnail fails, then raises a user-facing error if even that fails.
+    thumbnail fails, then raises a user-facing error if even that fails. If
+    ``cancel`` (a threading.Event) is set, ffmpeg is terminated and a
+    DownloadError("__CANCELLED__") is raised.
     """
-    rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, cover), on_progress, total_seconds)
+    rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, cover), on_progress, total_seconds, cancel)
     if rc == 0:
         return
+    if cancel is not None and cancel.is_set():
+        raise DownloadError("__CANCELLED__")
     if cover is not None:
-        rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, None), on_progress, total_seconds)
+        rc, err = _run(_build_cmd(audio_in, out_path, title, start, end, None), on_progress, total_seconds, cancel)
         if rc == 0:
             return
+        if cancel is not None and cancel.is_set():
+            raise DownloadError("__CANCELLED__")
     raise DownloadError("Couldn't convert the audio to MP3. " + (_hint(err) or "Please try again."))
 
 
@@ -72,7 +79,7 @@ _PROGRESS_KEYS = ("frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_t
                   "dup_frames=", "drop_frames=", "speed=", "progress=")
 
 
-def _run(cmd, on_progress=None, total_seconds=None) -> tuple[int, str]:
+def _run(cmd, on_progress=None, total_seconds=None, cancel=None) -> tuple[int, str]:
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **_no_window())
@@ -84,6 +91,12 @@ def _run(cmd, on_progress=None, total_seconds=None) -> tuple[int, str]:
     tail: list[str] = []
     if proc.stdout is not None:
         for raw in iter(proc.stdout.readline, ""):
+            if cancel is not None and cancel.is_set():
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                break
             line = raw.strip()
             if line.startswith("out_time_us=") and on_progress and total_seconds:
                 try:

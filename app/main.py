@@ -757,6 +757,8 @@ class App(ctk.CTk):
 
     def _open_bulk(self):
         from .bulk import BulkView  # lazy import avoids a circular import at startup
+        self._player.stop()          # bulk reuses the shared player; silence the single screen
+        self._cancel_playhead()
         try:
             self.minsize(770, 560)
             self.geometry("800x680")  # logical; list scrolls so height stays put

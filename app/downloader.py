@@ -268,10 +268,13 @@ def download_audio(
     workdir: Path,
     deno: Optional[str] = None,
     on_progress: Optional[Callable[[float], None]] = None,
+    cancel=None,
 ) -> tuple[Path, Optional[Path]]:
     """Download best audio (+ a jpg thumbnail) into ``workdir``.
 
-    Returns ``(audio_file, thumbnail_file_or_None)``.
+    Returns ``(audio_file, thumbnail_file_or_None)``. If ``cancel`` (a
+    threading.Event) is set mid-download, the yt-dlp process is terminated and a
+    DownloadError("__CANCELLED__") is raised.
     """
     cmd = [
         ytdlp, url,
@@ -300,6 +303,12 @@ def download_audio(
     # readline() (not "for line in proc.stdout") so progress streams in real time
     # on Windows instead of being block-buffered until the process exits.
     for raw in iter(proc.stdout.readline, ""):
+        if cancel is not None and cancel.is_set():
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            raise DownloadError("__CANCELLED__")
         line = raw.strip()
         if line.startswith("dl:"):
             m = _PCT.search(line)
@@ -309,6 +318,8 @@ def download_audio(
             tail.append(line)
             del tail[:-25]  # keep only the last 25 lines for error context
     proc.wait()
+    if cancel is not None and cancel.is_set():
+        raise DownloadError("__CANCELLED__")
     if proc.returncode != 0:
         raise DownloadError(_friendly("\n".join(tail)))
 

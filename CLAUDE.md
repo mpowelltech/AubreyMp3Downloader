@@ -181,6 +181,17 @@ light up only when usable, everything locks during a run, failed rows are
 skipped, trim is validated on the main thread before the worker starts (workers
 never touch Tk vars — values are snapshotted into plain dicts first).
 
+Each `BulkRow` can OPTIONALLY expand (the "Trim ▾" button) into an inline panel
+with a draggable `TrimTimeline` + waveform + Play/Stop, reusing the app's single
+`Player` (only one row plays at a time, tracked by `BulkView._row_active` with one
+`after`-based playhead poll). The row's preview audio is downloaded once into a
+temp subdir and **reused by the batch download** (job carries `audio`/`thumb`).
+A **Cancel** button stops a running batch: `BulkView._cancel` (threading.Event) is
+checked between songs AND passed into `download_audio`/`make_mp3`, whose subprocess
+read-loops terminate the child and raise `DownloadError("__CANCELLED__")` — so it
+stops within ~2s, not after the current song. The native folder picker opens at a
+local `initialdir` (App.default_dir()) to avoid a Parallels network-share hang.
+
 ## Dev workflow
 
 ```bash
