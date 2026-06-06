@@ -1508,7 +1508,42 @@ class ChooserView(ctk.CTkFrame):
             row=0, column=2, rowspan=2, padx=(6, 12), pady=10)
 
 
+def _selfcheck() -> int:
+    """`--selfcheck`: report whether the bundled audio backend + ffmpeg work, then
+    exit WITHOUT opening the GUI. Writes JSON to cache_dir()/selfcheck.json (and
+    stdout). Lets us verify a built exe without needing to click around."""
+    import json
+    import os
+    import shutil
+    res = {"version": __version__}
+    try:
+        import miniaudio  # noqa: F401
+        import _miniaudio  # noqa: F401
+        res["miniaudio"] = miniaudio.__version__
+        try:
+            dev = miniaudio.PlaybackDevice()
+            dev.close()
+            res["device"] = "ok"
+        except Exception as e:
+            res["device"] = f"fail: {e!r}"
+    except Exception as e:
+        res["miniaudio"] = f"import-fail: {e!r}"
+    ff = ffmpeg_binary()
+    res["ffmpeg"] = "ok" if ((os.path.isabs(ff) and os.path.exists(ff)) or shutil.which(ff)) else "missing"
+    text = json.dumps(res)
+    try:
+        with open(cache_dir() / "selfcheck.json", "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception:
+        pass
+    print(text)
+    return 0
+
+
 def main() -> None:
+    if "--selfcheck" in sys.argv:
+        _selfcheck()
+        return
     App().mainloop()
 
 

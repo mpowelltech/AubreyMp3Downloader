@@ -143,10 +143,14 @@ touch Tk widgets from a worker thread.**
   `_clear_cache` (Start over / new load) and `destroy()` remove the temp subdirs;
   each prefetch gets its OWN subdir so a still-finishing previous download can't
   collide on the `audio.<ext>` name. **Bundling gotcha:** `miniaudio` is a single
-  .py module and its compiled half is a SEPARATE top-level extension `_miniaudio`
-  (`_miniaudio.pyd`), so `collect_all("miniaudio")` misses it and the frozen exe
-  then can't import miniaudio ("preview isn't available"). The spec adds
-  `_miniaudio` to hiddenimports — keep that.
+  .py module and its compiled half is a SEPARATE top-level extension `_miniaudio`,
+  AND it's a cffi module so it also needs the cffi runtime `_cffi_backend`. None of
+  these live under `miniaudio`, so `collect_all("miniaudio")` misses them and the
+  frozen exe fails with `ModuleNotFoundError: _cffi_backend` (or `_miniaudio`) →
+  "preview isn't available". The spec adds hiddenimports `_miniaudio`, `cffi`,
+  `_cffi_backend` + `collect_all("cffi")` — keep all of that. Verify a build with
+  `Aubreys-YT-MP3-Downloader.exe --selfcheck` (writes cache_dir()/selfcheck.json:
+  miniaudio/device/ffmpeg status, no GUI).
 - **Crash visibility:** `App.report_callback_exception` is overridden so any
   unhandled exception in a Tk callback (button/trace/after) is written to
   `cache_dir()/error.log` AND shown to the user, instead of vanishing to a stderr

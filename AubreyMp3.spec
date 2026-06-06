@@ -31,7 +31,20 @@ try:
     ma_datas, ma_binaries, ma_hidden = collect_all("miniaudio")
 except Exception:
     ma_datas, ma_binaries, ma_hidden = [], [], []
-ma_hidden = list(ma_hidden) + ["miniaudio", "_miniaudio"]
+# miniaudio is a cffi module: it needs BOTH the compiled _miniaudio extension AND
+# the cffi runtime backend `_cffi_backend` (miniaudio.py line `import cffi`). Neither
+# is under the `miniaudio` module, so collect_all("miniaudio") misses them and the
+# frozen exe fails with ModuleNotFoundError: _cffi_backend / _miniaudio -> the
+# player silently reports "preview not available". Pull in the whole cffi package
+# + both extensions explicitly. (Verified in a frozen build on Windows.)
+ma_hidden = list(ma_hidden) + ["miniaudio", "_miniaudio", "cffi", "_cffi_backend"]
+try:
+    cffi_datas, cffi_binaries, cffi_hidden = collect_all("cffi")
+    ma_datas = list(ma_datas) + list(cffi_datas)
+    ma_binaries = list(ma_binaries) + list(cffi_binaries)
+    ma_hidden = ma_hidden + list(cffi_hidden)
+except Exception:
+    pass
 try:
     from PyInstaller.utils.hooks import collect_dynamic_libs
     ma_binaries = list(ma_binaries) + collect_dynamic_libs("_miniaudio")
